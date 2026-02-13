@@ -1,0 +1,9 @@
+# Governed surfaces (require explicit review)
+# Adjust to your org.
+
+# Patch sanitizer + protocol = safety-critical
+/packages/shared/src/sanitize/ @security-reviewers
+/packages/shared/src/protocol/ @security-reviewers
+
+# Arbitration policies
+/apps/server/src/arbitration/ @product-reviewers @security-reviewers
