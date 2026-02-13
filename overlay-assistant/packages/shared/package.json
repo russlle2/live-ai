@@ -1,0 +1,22 @@
+{
+  "name": "@overlay-assistant/shared",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./sanitize": "./dist/sanitize/index.js",
+    "./protocol": "./dist/protocol/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsc -p tsconfig.json --watch"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.4",
+    "typescript": "^5.6.2",
+    "vitest": "^2.0.5"
+  }
+}
