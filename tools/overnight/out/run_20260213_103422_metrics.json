@@ -1,0 +1,9 @@
+{
+  "run_id": "run_20260213_103422",
+  "total_calls": 9000,
+  "coach_decision": 8558,
+  "usedProductPack_true": 8558,
+  "usedFactsCount_gt0": 6769,
+  "suggestion_suppressed": 442,
+  "moment_unknown": 600
+}
