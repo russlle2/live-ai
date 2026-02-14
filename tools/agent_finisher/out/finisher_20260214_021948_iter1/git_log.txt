@@ -1,0 +1,4 @@
+5d64e05 Apply pro patch: offtrack bridge + unknown reducer + tone regex fix
+f82f67a WIP: pro brain + pipeline changes (checkpoint)
+e8730bb Overnight report run_20260213_103422
+ec8feac Foundation demo runs (ws + overlay + sanitizer + trust logging)

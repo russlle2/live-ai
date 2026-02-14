@@ -1,0 +1,898 @@
+You are an expert software engineer improving a call-coaching system ("overlay-assistant").
+You MUST be memoryless: rely ONLY on what is included in this prompt.
+Return TWO outputs:
+(A) A unified diff patch that can be applied with `git apply`.
+(B) A file bundle as JSON with keys = file paths and values = full file contents (only for new files or full rewrites).
+
+Hard rules:
+- Do not change WebSocket protocol types unless you also update shared types and tests.
+- Do not remove existing features.
+- Prefer small, safe patches that reduce moment="unknown" and improve confidence bands.
+- Keep privacy constraints: do not log raw transcript content beyond current behavior.
+- Ensure builds pass: packages/shared, apps/server, apps/web.
+- Add or update tests where easy.
+- Focus on: moment detection coverage, tone handling, off-topic bridge quality, and cold-call decision-maker routing.
+
+Repo signals:
+- Unknown moment is high in stress tests (see artifacts).
+- Your output MUST include: PATCH_START ... PATCH_END for the diff.
+- And FILES_START ... FILES_END for the JSON bundle.
+
+Artifacts:
+[git_status]
+?? tools/agent_finisher/
+
+[overnight_report.md]
+# Overnight Report v3
+
+Run: **run_20260213_063643**
+Started: 2026-02-13T11:36:43.228Z
+Finished: 2026-02-13T11:36:44.442Z
+
+## Volume
+- Sessions: **600**
+- Turns: **7200**
+- Suppressed: **961**
+- Moment=unknown: **2621**
+
+## Coverage
+### Moment distribution (top 15)
+- unknown: 2621
+- integration: 1367
+- security: 1039
+- competitor: 727
+- value: 406
+- price: 321
+- deployment: 303
+- stakeholder: 218
+- timeline: 198
+
+### Micro-goal distribution (top 15)
+- clarify: 2248
+- advance_next_step: 1612
+- define_requirements: 1282
+- differentiate: 635
+- de_risk_security: 608
+- qualify_deployment: 303
+- isolate_constraint: 266
+- map_stakeholders: 218
+- reframe_value: 28
+
+### Confidence band
+- low: 6266
+- medium: 934
+
+## Product-pack usage
+- usedProductPack=true: 0
+- usedProductPack=false: 7200
+
+### Facts used per suggestion
+- 0: 7200
+- 1: 0
+- 2: 0
+- 3+: 0
+
+## Top terms correlated with unknown/suppressed
+- we're: 1690
+- version: 1464
+- i'm: 1420
+- short: 1288
+- week: 1188
+- what's: 1098
+- non-technical: 1011
+- deciding: 990
+- also: 964
+- quick: 871
+- question: 871
+- answer: 797
+- need: 626
+- competitor: 595
+- straight: 577
+- about: 561
+- review: 540
+- tell: 493
+- quel: 457
+- est: 457
+- call: 452
+- security: 451
+- product: 420
+- technical: 409
+- next: 400
+- needs: 390
+- keep: 385
+- one: 385
+- sentence: 385
+- salesforce: 375
+
+## Suggested next patches (human review)
+1) **Stakeholder sign-off**: Add moment/intent patterns for "signs off", "approve", "CFO", "procurement", "legal review".
+2) **Style constraints**: Detect and honor modifiers like "short version", "non-technical", "answer today".
+3) **Off-topic prompts**: Keep a consistent fallback: clarify → reframe back to evaluation criteria → propose next step.
+4) **Suppression**: If confidence is low, default to a safe clarify question instead of outputting nothing.
+
+## How to run again
+```bash
+bash tools/overnight/run_v3.sh --minutes 60 --sessions 600 --turns 12 --concurrency 2
+```
+
+[metrics.json]
+{
+  "runId": "run_20260213_063643",
+  "startedAt": "2026-02-13T11:36:43.228Z",
+  "finishedAt": "2026-02-13T11:36:44.442Z",
+  "config": {
+    "minutes": 60,
+    "sessions": 600,
+    "turns": 12,
+    "concurrency": 2,
+    "seed": 1337,
+    "applyFacts": false,
+    "outRoot": "tools/overnight/out"
+  },
+  "totalTurns": 7200,
+  "sessionsSimulated": 600,
+  "suppressedTurns": 961,
+  "unknownMomentTurns": 2621,
+  "byMoment": {
+    "integration": 1367,
+    "stakeholder": 218,
+    "unknown": 2621,
+    "competitor": 727,
+    "security": 1039,
+    "timeline": 198,
+    "value": 406,
+    "price": 321,
+    "deployment": 303
+  },
+  "byMicroGoal": {
+    "define_requirements": 1282,
+    "map_stakeholders": 218,
+    "clarify": 2248,
+    "differentiate": 635,
+    "de_risk_security": 608,
+    "advance_next_step": 1612,
+    "isolate_constraint": 266,
+    "reframe_value": 28,
+    "qualify_deployment": 303
+  },
+  "byConfidenceBand": {
+    "low": 6266,
+    "medium": 934
+  },
+  "byLanguage": {
+    "en": 6775,
+    "es": 425
+  },
+  "usedProductPackTrue": 0,
+  "usedProductPackFalse": 7200,
+  "usedFactsCount": {
+    "0": 7200,
+    "1": 0,
+    "2": 0,
+    "3+": 0
+  },
+  "topUnknownTerms": [
+    {
+      "term": "we're",
+      "count": 1690
+    },
+    {
+      "term": "version",
+      "count": 1464
+    },
+    {
+      "term": "i'm",
+      "count": 1420
+    },
+    {
+      "term": "short",
+      "count": 1288
+    },
+    {
+      "term": "week",
+      "count": 1188
+    },
+    {
+      "term": "what's",
+      "count": 1098
+    },
+    {
+      "term": "non-technical",
+      "count": 1011
+    },
+    {
+      "term": "deciding",
+      "count": 990
+    },
+    {
+      "term": "also",
+      "count": 964
+    },
+    {
+      "term": "quick",
+      "count": 871
+    },
+    {
+      "term": "question",
+      "count": 871
+    },
+    {
+      "term": "answer",
+      "count": 797
+    },
+    {
+      "term": "need",
+      "count": 626
+    },
+    {
+      "term": "competitor",
+      "count": 595
+    },
+    {
+      "term": "straight",
+      "count": 577
+    },
+    {
+      "term": "about",
+      "count": 561
+    },
+    {
+      "term": "review",
+      "count": 540
+    },
+    {
+      "term": "tell",
+      "count": 493
+    },
+    {
+      "term": "quel",
+      "count": 457
+    },
+    {
+      "term": "est",
+      "count": 457
+    },
+    {
+      "term": "call",
+      "count": 452
+    },
+    {
+      "term": "security",
+      "count": 451
+    },
+    {
+      "term": "product",
+      "count": 420
+    },
+    {
+      "term": "technical",
+      "count": 409
+    },
+    {
+      "term": "next",
+      "count": 400
+    },
+    {
+      "term": "needs",
+      "count": 390
+    },
+    {
+      "term": "keep",
+      "count": 385
+    },
+    {
+      "term": "one",
+      "count": 385
+    },
+    {
+      "term": "sentence",
+      "count": 385
+    },
+    {
+      "term": "salesforce",
+      "count": 375
+    },
+    {
+      "term": "sso",
+      "count": 375
+    },
+    {
+      "term": "retention",
+      "count": 371
+    },
+    {
+      "term": "biggest",
+      "count": 367
+    },
+    {
+      "term": "risk",
+      "count": 367
+    },
+    {
+      "term": "avoid",
+      "count": 367
+    },
+    {
+      "term": "don't",
+      "count": 366
+    },
+    {
+      "term": "expensive",
+      "count": 336
+    },
+    {
+      "term": "give",
+      "count": 330
+    },
+    {
+      "term": "comparing",
+      "count": 329
+    },
+    {
+      "term": "day",
+      "count": 326
+    },
+    {
+      "term": "sync",
+      "count": 324
+    },
+    {
+      "term": "cfo",
+      "count": 320
+    },
+    {
+      "term": "signs",
+      "count": 320
+    },
+    {
+      "term": "off",
+      "count": 320
+    },
+    {
+      "term": "usually",
+      "count": 320
+    },
+    {
+      "term": "see",
+      "count": 320
+    },
+    {
+      "term": "approve",
+      "count": 320
+    },
+    {
+      "term": "live",
+      "count": 313
+    },
+    {
+      "term": "integration",
+      "count": 313
+    },
+    {
+      "term": "depth",
+      "count": 313
+    },
+    {
+      "term": "main",
+      "count": 313
+    },
+    {
+      "term": "criteria",
+      "count": 313
+    },
+    {
+      "term": "florida's",
+      "count": 303
+    },
+    {
+      "term": "weather",
+      "count": 303
+    },
+    {
+      "term": "good",
+      "count": 303
+    },
+    {
+      "term": "medium",
+      "count": 303
+    },
+    {
+      "term": "deploy",
+      "count": 303
+    },
+    {
+      "term": "services",
+      "count": 303
+    },
+    {
+      "term": "dit",
+      "count": 281
+    },
+    {
+      "term": "oui",
+      "count": 281
+    },
+    {
+      "term": "calendrier",
+      "count": 281
+    },
+    {
+      "term": "ploiement",
+      "count": 281
+    },
+    {
+      "term": "already",
+      "count": 266
+    },
+    {
+      "term": "use",
+      "count": 266
+    },
+    {
+      "term": "switch",
+      "count": 266
+    },
+    {
+      "term": "budget",
+      "count": 247
+    },
+    {
+      "term": "pressure",
+      "count": 247
+    },
+    {
+      "term": "smaller",
+      "count": 247
+    },
+    {
+      "term": "plan",
+      "count": 247
+    },
+    {
+      "term": "start",
+      "count": 247
+    },
+    {
+      "term": "concerned",
+      "count": 236
+    },
+    {
+      "term": "soc",
+      "count": 236
+    },
+    {
+      "term": "data",
+      "count": 236
+    },
+    {
+      "term": "handle",
+      "count": 236
+    },
+    {
+      "term": "procurement",
+      "count": 218
+    },
+    {
+      "term": "legal",
+      "count": 218
+    },
+    {
+      "term": "typical",
+      "count": 218
+    },
+    {
+      "term": "process",
+      "count": 218
+    },
+    {
+      "term": "provide",
+      "count": 218
+    },
+    {
+      "term": "s'inqui",
+      "count": 217
+    }
+  ]
+}
+
+[top_terms_unknown.json]
+[
+  {
+    "term": "we're",
+    "count": 1690
+  },
+  {
+    "term": "version",
+    "count": 1464
+  },
+  {
+    "term": "i'm",
+    "count": 1420
+  },
+  {
+    "term": "short",
+    "count": 1288
+  },
+  {
+    "term": "week",
+    "count": 1188
+  },
+  {
+    "term": "what's",
+    "count": 1098
+  },
+  {
+    "term": "non-technical",
+    "count": 1011
+  },
+  {
+    "term": "deciding",
+    "count": 990
+  },
+  {
+    "term": "also",
+    "count": 964
+  },
+  {
+    "term": "quick",
+    "count": 871
+  },
+  {
+    "term": "question",
+    "count": 871
+  },
+  {
+    "term": "answer",
+    "count": 797
+  },
+  {
+    "term": "need",
+    "count": 626
+  },
+  {
+    "term": "competitor",
+    "count": 595
+  },
+  {
+    "term": "straight",
+    "count": 577
+  },
+  {
+    "term": "about",
+    "count": 561
+  },
+  {
+    "term": "review",
+    "count": 540
+  },
+  {
+    "term": "tell",
+    "count": 493
+  },
+  {
+    "term": "quel",
+    "count": 457
+  },
+  {
+    "term": "est",
+    "count": 457
+  },
+  {
+    "term": "call",
+    "count": 452
+  },
+  {
+    "term": "security",
+    "count": 451
+  },
+  {
+    "term": "product",
+    "count": 420
+  },
+  {
+    "term": "technical",
+    "count": 409
+  },
+  {
+    "term": "next",
+    "count": 400
+  },
+  {
+    "term": "needs",
+    "count": 390
+  },
+  {
+    "term": "keep",
+    "count": 385
+  },
+  {
+    "term": "one",
+    "count": 385
+  },
+  {
+    "term": "sentence",
+    "count": 385
+  },
+  {
+    "term": "salesforce",
+    "count": 375
+  },
+  {
+    "term": "sso",
+    "count": 375
+  },
+  {
+    "term": "retention",
+    "count": 371
+  },
+  {
+    "term": "biggest",
+    "count": 367
+  },
+  {
+    "term": "risk",
+    "count": 367
+  },
+  {
+    "term": "avoid",
+    "count": 367
+  },
+  {
+    "term": "don't",
+    "count": 366
+  },
+  {
+    "term": "expensive",
+    "count": 336
+  },
+  {
+    "term": "give",
+    "count": 330
+  },
+  {
+    "term": "comparing",
+    "count": 329
+  },
+  {
+    "term": "day",
+    "count": 326
+  },
+  {
+    "term": "sync",
+    "count": 324
+  },
+  {
+    "term": "cfo",
+    "count": 320
+  },
+  {
+    "term": "signs",
+    "count": 320
+  },
+  {
+    "term": "off",
+    "count": 320
+  },
+  {
+    "term": "usually",
+    "count": 320
+  },
+  {
+    "term": "see",
+    "count": 320
+  },
+  {
+    "term": "approve",
+    "count": 320
+  },
+  {
+    "term": "live",
+    "count": 313
+  },
+  {
+    "term": "integration",
+    "count": 313
+  },
+  {
+    "term": "depth",
+    "count": 313
+  },
+  {
+    "term": "main",
+    "count": 313
+  },
+  {
+    "term": "criteria",
+    "count": 313
+  },
+  {
+    "term": "florida's",
+    "count": 303
+  },
+  {
+    "term": "weather",
+    "count": 303
+  },
+  {
+    "term": "good",
+    "count": 303
+  },
+  {
+    "term": "medium",
+    "count": 303
+  },
+  {
+    "term": "deploy",
+    "count": 303
+  },
+  {
+    "term": "services",
+    "count": 303
+  },
+  {
+    "term": "dit",
+    "count": 281
+  },
+  {
+    "term": "oui",
+    "count": 281
+  },
+  {
+    "term": "calendrier",
+    "count": 281
+  },
+  {
+    "term": "ploiement",
+    "count": 281
+  },
+  {
+    "term": "already",
+    "count": 266
+  },
+  {
+    "term": "use",
+    "count": 266
+  },
+  {
+    "term": "switch",
+    "count": 266
+  },
+  {
+    "term": "budget",
+    "count": 247
+  },
+  {
+    "term": "pressure",
+    "count": 247
+  },
+  {
+    "term": "smaller",
+    "count": 247
+  },
+  {
+    "term": "plan",
+    "count": 247
+  },
+  {
+    "term": "start",
+    "count": 247
+  },
+  {
+    "term": "concerned",
+    "count": 236
+  },
+  {
+    "term": "soc",
+    "count": 236
+  },
+  {
+    "term": "data",
+    "count": 236
+  },
+  {
+    "term": "handle",
+    "count": 236
+  },
+  {
+    "term": "procurement",
+    "count": 218
+  },
+  {
+    "term": "legal",
+    "count": 218
+  },
+  {
+    "term": "typical",
+    "count": 218
+  },
+  {
+    "term": "process",
+    "count": 218
+  },
+  {
+    "term": "provide",
+    "count": 218
+  },
+  {
+    "term": "s'inqui",
+    "count": 217
+  }
+]
+
+[regex_suggestions.md]
+# Regex suggestions (v3 heuristic)
+
+These are not auto-applied. They’re meant to guide updates in your moment/intent detection.
+
+## Stakeholder sign-off / procurement
+Suggested patterns to catch:
+- signs off / approval / approve / approved
+- CFO / finance / budget owner
+- procurement / legal / security review / DPA / MSA
+
+Example regex:
+```
+/\b(signs?\s+off|approv(e|al)|cfo|finance|budget\s+owner|procurement|legal|msa|dpa|security\s+review)\b/i
+```
+
+## Style constraints
+Catch modifiers and treat them as style constraints, not 'unknown moment':
+```
+/\b(short\s+version|tl;dr|keep\s+it\s+short|non-technical|explain\s+like\s+i\'?m\s+five|answer\s+today|deciding\s+this\s+week)\b/i
+```
+
+[facts_todo.md]
+# Facts TODO (v3)
+
+Add / refine facts (product pack) for the concepts below (filtered from unknown/suppressed turns).
+
+- we're: add a short, safe fact that helps coaching
+- i'm: add a short, safe fact that helps coaching
+- what's: add a short, safe fact that helps coaching
+- non-technical: add a short, safe fact that helps coaching
+- deciding: add a short, safe fact that helps coaching
+- also: add a short, safe fact that helps coaching
+- answer: add a short, safe fact that helps coaching
+- need: add a short, safe fact that helps coaching
+- competitor: add a short, safe fact that helps coaching
+- straight: add a short, safe fact that helps coaching
+- about: add a short, safe fact that helps coaching
+- review: add a short, safe fact that helps coaching
+- tell: add a short, safe fact that helps coaching
+- quel: add a short, safe fact that helps coaching
+- est: add a short, safe fact that helps coaching
+- call: add a short, safe fact that helps coaching
+- security: add a short, safe fact that helps coaching
+- product: add a short, safe fact that helps coaching
+- technical: add a short, safe fact that helps coaching
+- next: add a short, safe fact that helps coaching
+- needs: add a short, safe fact that helps coaching
+- keep: add a short, safe fact that helps coaching
+- one: add a short, safe fact that helps coaching
+- sentence: add a short, safe fact that helps coaching
+- salesforce: add a short, safe fact that helps coaching
+- sso: add a short, safe fact that helps coaching
+- retention: add a short, safe fact that helps coaching
+- biggest: add a short, safe fact that helps coaching
+- risk: add a short, safe fact that helps coaching
+- avoid: add a short, safe fact that helps coaching
+- don't: add a short, safe fact that helps coaching
+- expensive: add a short, safe fact that helps coaching
+- give: add a short, safe fact that helps coaching
+- comparing: add a short, safe fact that helps coaching
+- day: add a short, safe fact that helps coaching
+- sync: add a short, safe fact that helps coaching
+- cfo: add a short, safe fact that helps coaching
+- signs: add a short, safe fact that helps coaching
+- off: add a short, safe fact that helps coaching
+- usually: add a short, safe fact that helps coaching
+
+Suggested baseline facts to add (if missing):
+- stakeholder approval criteria (CFO, legal, security)
+- procurement checklist (SOC2, DPA/MSA, retention, data flow)
+- timeline acceleration path (fastest way to verify integrations)
+- short answer formatting
+- non-technical explanation template
+
+[failures.csv]
+
