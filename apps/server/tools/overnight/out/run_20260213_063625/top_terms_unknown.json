@@ -1,0 +1,322 @@
+[
+  {
+    "term": "we're",
+    "count": 10
+  },
+  {
+    "term": "about",
+    "count": 7
+  },
+  {
+    "term": "deciding",
+    "count": 7
+  },
+  {
+    "term": "week",
+    "count": 7
+  },
+  {
+    "term": "retention",
+    "count": 6
+  },
+  {
+    "term": "quick",
+    "count": 4
+  },
+  {
+    "term": "question",
+    "count": 4
+  },
+  {
+    "term": "sync",
+    "count": 3
+  },
+  {
+    "term": "salesforce",
+    "count": 3
+  },
+  {
+    "term": "sso",
+    "count": 3
+  },
+  {
+    "term": "store",
+    "count": 3
+  },
+  {
+    "term": "call",
+    "count": 3
+  },
+  {
+    "term": "audio",
+    "count": 3
+  },
+  {
+    "term": "pii",
+    "count": 3
+  },
+  {
+    "term": "redaction",
+    "count": 3
+  },
+  {
+    "term": "windows",
+    "count": 3
+  },
+  {
+    "term": "concerned",
+    "count": 3
+  },
+  {
+    "term": "soc",
+    "count": 3
+  },
+  {
+    "term": "data",
+    "count": 3
+  },
+  {
+    "term": "handle",
+    "count": 3
+  },
+  {
+    "term": "short",
+    "count": 3
+  },
+  {
+    "term": "version",
+    "count": 3
+  },
+  {
+    "term": "dit",
+    "count": 3
+  },
+  {
+    "term": "oui",
+    "count": 3
+  },
+  {
+    "term": "quel",
+    "count": 3
+  },
+  {
+    "term": "est",
+    "count": 3
+  },
+  {
+    "term": "calendrier",
+    "count": 3
+  },
+  {
+    "term": "ploiement",
+    "count": 3
+  },
+  {
+    "term": "integrate",
+    "count": 2
+  },
+  {
+    "term": "deep",
+    "count": 2
+  },
+  {
+    "term": "writeback",
+    "count": 2
+  },
+  {
+    "term": "already",
+    "count": 2
+  },
+  {
+    "term": "use",
+    "count": 2
+  },
+  {
+    "term": "competitor",
+    "count": 2
+  },
+  {
+    "term": "switch",
+    "count": 2
+  },
+  {
+    "term": "i'm",
+    "count": 2
+  },
+  {
+    "term": "security",
+    "count": 2
+  },
+  {
+    "term": "budget",
+    "count": 2
+  },
+  {
+    "term": "pressure",
+    "count": 2
+  },
+  {
+    "term": "smaller",
+    "count": 2
+  },
+  {
+    "term": "plan",
+    "count": 2
+  },
+  {
+    "term": "start",
+    "count": 2
+  },
+  {
+    "term": "tell",
+    "count": 2
+  },
+  {
+    "term": "'deep",
+    "count": 1
+  },
+  {
+    "term": "integration'",
+    "count": 1
+  },
+  {
+    "term": "mean",
+    "count": 1
+  },
+  {
+    "term": "real-time",
+    "count": 1
+  },
+  {
+    "term": "audit",
+    "count": 1
+  },
+  {
+    "term": "logs",
+    "count": 1
+  },
+  {
+    "term": "permissions",
+    "count": 1
+  },
+  {
+    "term": "reliability",
+    "count": 1
+  },
+  {
+    "term": "straight",
+    "count": 1
+  },
+  {
+    "term": "technical",
+    "count": 1
+  },
+  {
+    "term": "don't",
+    "count": 1
+  },
+  {
+    "term": "need",
+    "count": 1
+  },
+  {
+    "term": "understand",
+    "count": 1
+  },
+  {
+    "term": "model",
+    "count": 1
+  },
+  {
+    "term": "before",
+    "count": 1
+  },
+  {
+    "term": "move",
+    "count": 1
+  },
+  {
+    "term": "forward",
+    "count": 1
+  },
+  {
+    "term": "answer",
+    "count": 1
+  },
+  {
+    "term": "non-technical",
+    "count": 1
+  },
+  {
+    "term": "keep",
+    "count": 1
+  },
+  {
+    "term": "one",
+    "count": 1
+  },
+  {
+    "term": "sentence",
+    "count": 1
+  },
+  {
+    "term": "only",
+    "count": 1
+  },
+  {
+    "term": "roll",
+    "count": 1
+  },
+  {
+    "term": "out",
+    "count": 1
+  },
+  {
+    "term": "reps",
+    "count": 1
+  },
+  {
+    "term": "first",
+    "count": 1
+  },
+  {
+    "term": "still",
+    "count": 1
+  },
+  {
+    "term": "work",
+    "count": 1
+  },
+  {
+    "term": "florida's",
+    "count": 1
+  },
+  {
+    "term": "weather",
+    "count": 1
+  },
+  {
+    "term": "good",
+    "count": 1
+  },
+  {
+    "term": "medium",
+    "count": 1
+  },
+  {
+    "term": "deploy",
+    "count": 1
+  },
+  {
+    "term": "services",
+    "count": 1
+  },
+  {
+    "term": "ignore",
+    "count": 1
+  },
+  {
+    "term": "previous",
+    "count": 1
+  }
+]

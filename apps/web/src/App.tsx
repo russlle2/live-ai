@@ -30,6 +30,8 @@ export function App() {
   const [transcript, setTranscript] = useState<string[]>([]);
   const [overlayState, setOverlayState] = useState<OverlayStateV1>(DEFAULT_STATE);
   const [inputText, setInputText] = useState("");
+  const [lastOverlayMessage, setLastOverlayMessage] = useState<any>(null);
+  const [lastPatchPayload, setLastPatchPayload] = useState<any>(null);
 
   const wsUrl = useMemo(() => {
     const host = window.location.hostname;
@@ -37,11 +39,19 @@ export function App() {
   }, []);
 
   const applyPatch = (patch: any) => {
-    // v1 strict patch: { text?: string, settings?: {...} }
     setOverlayState((s: any) => {
       const next: any = { ...s };
+
       if (patch && typeof patch.text === "string") next.text = patch.text;
-      if (patch && patch.settings && typeof patch.settings === "object") next.settings = { ...next.settings, ...patch.settings };
+
+      if (patch && patch.settings && typeof patch.settings === "object") {
+        next.settings = { ...next.settings, ...patch.settings };
+      }
+
+      if (patch && patch.guidance && typeof patch.guidance === "object" && Array.isArray(patch.guidance.items)) {
+        next.guidance = { ...next.guidance, items: patch.guidance.items };
+      }
+
       return next;
     });
   };
@@ -53,8 +63,10 @@ export function App() {
     }
 
     if (m.type === "patch") {
-      // client-side sanitize again (defense-in-depth)
       const res = sanitizePatch_v1((m as any).patch);
+      // DEBUG: verify patch payload shape
+      // eslint-disable-next-line no-console
+      console.log("[patch payload]", (m as any).patch);
 
       if (!res.ok) {
         await postUiEvent({
@@ -64,12 +76,6 @@ export function App() {
           eventType: "patch_rejected",
           data: { reason: (res as any).reason, bytes: (res as any).bytes }
         });
-
-        // Fallback for demo stability: allow simple {text:string} to render
-        const raw = (m as any).patch;
-        if (raw && typeof raw === "object" && typeof raw.text === "string") {
-          applyPatch({ text: raw.text });
-        }
         return;
       }
 
@@ -108,7 +114,8 @@ export function App() {
       }
 
       if (msg.type === "overlay_message") {
-        // IMPORTANT: server wraps overlay messages inside this envelope
+        setLastOverlayMessage(msg.message as any);
+        setLastPatchPayload((msg.message as any)?.type === "patch" ? (msg.message as any).patch : null);
         handleOverlayMessage(msg.message as any);
         return;
       }
@@ -139,7 +146,6 @@ export function App() {
   const onDismiss = async (itemId: string) => {
     await postUiEvent({ tenantId, repId, sessionId, eventType: "suggestion_dismissed", data: { itemId } });
     setOverlayState((s) => ({ ...s, guidance: { ...s.guidance, items: s.guidance.items.filter((x) => x.id !== itemId) } }));
-    // v1 strict: also clear text suggestion when dismissed
     setOverlayState((s: any) => ({ ...s, text: "" }));
   };
 
@@ -212,7 +218,17 @@ export function App() {
 
           <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
             <h3>Overlay preview</h3>
-            <OverlayPreview state={overlayState} onShown={onShown} onApply={onApply} onDismiss={onDismiss} onMuteToggle={onMuteToggle} />
+            <div style={{ fontSize: 12, color: "#666", marginBottom: 6 }}>
+              UI state: guidance.items = {overlayState.guidance.items.length} • text = {String((overlayState as any).text ?? "").slice(0, 60)}
+            </div>
+
+            <OverlayPreview
+              state={overlayState}
+              onShown={onShown}
+              onApply={onApply}
+              onDismiss={onDismiss}
+              onMuteToggle={onMuteToggle}
+            />
           </div>
         </div>
       )}

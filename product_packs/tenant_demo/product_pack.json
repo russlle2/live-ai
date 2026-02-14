@@ -1,0 +1,31 @@
+{
+  "schema": "product_pack_v1",
+  "productName": "Overlay Assistant",
+  "oneLiner": "Real-time call coaching overlay that suggests what to say next, safely and fast.",
+  "icp": "Revenue teams doing discovery, evaluation, and negotiation calls.",
+  "differentiators": [
+    "Low-latency coaching overlay with guardrails (sanitized patches + deterministic fallback).",
+    "Trust dashboard + telemetry for adoption (apply/dismiss/mute signals)."
+  ],
+  "proofPoints": [
+    "Works even when LLM is off (deterministic playbooks).",
+    "Designed to avoid logging raw transcripts by default (hash + length)."
+  ],
+  "integrations": [
+    "Salesforce (stub)",
+    "HubSpot (stub)",
+    "WebSocket overlay transport",
+    "Product Pack (tenant-specific truth)"
+  ],
+  "compliance": [],
+  "forbiddenClaims": [
+    "HIPAA compliant",
+    "guaranteed results",
+    "100% accurate"
+  ],
+  "allowedClaims": [
+    "We can share security docs upon request",
+    "We support tenant-level product packs and guardrails"
+  ],
+  "languages": ["en"]
+}

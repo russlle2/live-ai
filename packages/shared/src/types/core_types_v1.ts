@@ -10,6 +10,7 @@ export type GuidanceControls = {
 };
 
 export type ExplanationV1 = {
+  [key: string]: any;
   schema: "explanation_v1";
   ruleId?: string;
   reasons: string[]; // pre-sanitized, no transcript text

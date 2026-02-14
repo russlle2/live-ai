@@ -1,0 +1,15 @@
+{
+  "schema": "facts_v1",
+  "facts": [
+    {
+      "id": "integration_01",
+      "text": "Integration depth usually means: what systems connect, whether there is writeback, permissioning/audit logs, and reliability under real call load.",
+      "tags": ["integration", "evaluation", "crm", "sso"]
+    },
+    {
+      "id": "value_01",
+      "text": "A safe value framing is outcomes + risk reduction: time-to-value, reduced failures, and consistency across reps.",
+      "tags": ["value", "price", "roi"]
+    }
+  ]
+}

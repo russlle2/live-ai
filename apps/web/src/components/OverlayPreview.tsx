@@ -3,8 +3,8 @@ import type { OverlayStateV1 } from "@overlay-assistant/shared";
 
 /**
  * OverlayPreview
- * - Supports the richer guidance.items[] model (future P1/P2)
- * - Also supports v1-strict "text-only" patches (current backend)
+ * - Renders guidance.items when present (primary)
+ * - Falls back to v1 text-only patch at state.text
  */
 export function OverlayPreview(props: {
   state: OverlayStateV1;
@@ -14,19 +14,14 @@ export function OverlayPreview(props: {
   onMuteToggle: () => Promise<void>;
 }) {
   const { state } = props;
-  // DEBUG: inspect state shape for text patches
-  // eslint-disable-next-line no-console
-  console.log("[OverlayPreview state]", state);
   const shownSet = useRef(new Set<string>());
 
-  // v1-strict: if no guidance items are present, show the patched overlay text
   const textSuggestion = useMemo(() => {
     const t = (state as any)?.text;
     return typeof t === "string" && t.trim().length ? t.trim() : "";
   }, [state]);
 
   useEffect(() => {
-    // Mark guidance items as shown (analytics)
     for (const item of state.guidance.items) {
       if (!shownSet.current.has(item.id)) {
         shownSet.current.add(item.id);
@@ -52,7 +47,6 @@ export function OverlayPreview(props: {
         ) : null}
       </div>
 
-      {/* If we have guidance items, render them */}
       {state.guidance.items.length > 0 ? (
         state.guidance.items.map((g) => (
           <div key={g.id} style={{ border: "1px solid #eee", borderRadius: 8, padding: 10, marginBottom: 10 }}>
@@ -80,12 +74,10 @@ export function OverlayPreview(props: {
           </div>
         ))
       ) : textSuggestion ? (
-        // v1-strict text suggestion
         <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 10 }}>
           <div style={{ fontWeight: 700, marginBottom: 6 }}>Suggested line</div>
           <div style={{ marginBottom: 10 }}>{textSuggestion}</div>
           <div style={{ display: "flex", gap: 6 }}>
-            {/* In v1-strict we don't have item IDs; use a fixed synthetic ID for analytics */}
             <button onClick={() => props.onApply("text_v1")}>Apply</button>
             <button onClick={() => props.onDismiss("text_v1")}>Dismiss</button>
           </div>

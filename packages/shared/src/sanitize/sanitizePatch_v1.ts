@@ -1,13 +1,28 @@
 /**
- * sanitizePatch_v1 (v1 strict)
- * - Fail-closed overlay patch sanitizer
- * - Allowlisted keys only
- * - Hard payload cap <= 8192 bytes (default)
- *
- * NOTE: Guidance patching is intentionally NOT supported in v1 strict,
- * because the repo's GuidanceItemV1 is a richer shape. We will enable it
- * later once we align the GuidanceItem schema. For now, "guidance" is dropped.
+ * sanitizePatch_v1 (strict, allowlisted)
+ * - Supports v1 patch object: { text?, settings?, guidance? }
+ * - Hard payload cap <= 8192 bytes
+ * - Guidance items must match core GuidanceItemV1 shape (id/title/category/text/confidence/confidenceBand)
  */
+
+import type { GuidanceItemV1 as CoreGuidanceItemV1 } from "../types/core_types_v1";
+
+// Cross-runtime byte length (Node + browser)
+function byteLen(s: string): number {
+  try {
+    // Browser / modern runtimes
+    // @ts-ignore
+    if (typeof TextEncoder !== "undefined") return new TextEncoder().encode(s).length;
+  } catch {}
+  try {
+    // Node.js
+    // @ts-ignore
+    if (typeof Buffer !== "undefined") return Buffer.byteLength(s, "utf8");
+  } catch {}
+  // Fallback (approx)
+  return s.length;
+}
+
 
 export type PatchRejectReason =
   | "payload_too_large"
@@ -26,6 +41,7 @@ export type OverlaySettingsPatchV1 = Partial<{
 export type OverlayPatchV1 = Partial<{
   text: string;
   settings: OverlaySettingsPatchV1;
+  guidance: { items: CoreGuidanceItemV1[] };
 }>;
 
 // Protocol layer expects this name:
@@ -34,6 +50,7 @@ export type SanitizedPatchV1 = OverlayPatchV1;
 export type SanitizeOptionsV1 = {
   maxBytes?: number;     // default 8192
   maxTextChars?: number; // default 20_000
+  maxGuidanceItems?: number; // default 6
 };
 
 export type SanitizeOk = {
@@ -55,13 +72,54 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> =>
 
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
 
+function clampString(v: string, max: number) {
+  return v.length > max ? v.slice(0, max) : v;
+}
+
+function sanitizeGuidanceItem(x: unknown, dropped: string[], idx: number): CoreGuidanceItemV1 | null {
+  if (!isPlainObject(x)) return null;
+
+  const id = typeof x.id === "string" ? clampString(x.id, 64) : "";
+  const title = typeof x.title === "string" ? clampString(x.title, 80) : "";
+  const category = typeof x.category === "string" ? clampString(x.category, 80) : "";
+  const text = typeof x.text === "string" ? clampString(x.text, 800) : "";
+
+  const confidence = typeof x.confidence === "number" ? clamp(x.confidence, 0, 1) : NaN;
+  const confidenceBand = typeof x.confidenceBand === "string" ? x.confidenceBand : "";
+
+  const bandOk = confidenceBand === "low" || confidenceBand === "medium" || confidenceBand === "high";
+
+  if (!id) dropped.push(`guidance.items[${idx}].id`);
+  if (!title) dropped.push(`guidance.items[${idx}].title`);
+  if (!category) dropped.push(`guidance.items[${idx}].category`);
+  if (!text) dropped.push(`guidance.items[${idx}].text`);
+  if (!Number.isFinite(confidence)) dropped.push(`guidance.items[${idx}].confidence`);
+  if (!bandOk) dropped.push(`guidance.items[${idx}].confidenceBand`);
+
+  if (!id || !title || !category || !text || !Number.isFinite(confidence) || !bandOk) return null;
+
+  // explanation can be any JSON-ish object; cap size
+  let explanation: any = undefined;
+  if ("explanation" in x) {
+    try {
+      const s = JSON.stringify((x as any).explanation);
+      if (typeof s === "string" && s.length <= 6000) explanation = (x as any).explanation;
+      else dropped.push(`guidance.items[${idx}].explanation`);
+    } catch {
+      dropped.push(`guidance.items[${idx}].explanation`);
+    }
+  }
+
+  return { id, title, category, text, confidence, confidenceBand, explanation } as CoreGuidanceItemV1;
+}
+
 export function sanitizePatch_v1(input: unknown, opts: SanitizeOptionsV1 = {}): SanitizeOk | SanitizeErr {
-  const { maxBytes = 8192, maxTextChars = 20_000 } = opts;
+  const { maxBytes = 8192, maxTextChars = 20_000, maxGuidanceItems = 6 } = opts;
 
   // Pre-size gate
   let rawBytes = 0;
   try {
-    rawBytes = Buffer.byteLength(JSON.stringify(input), "utf8");
+    rawBytes = byteLen(JSON.stringify(input));
   } catch {
     return { ok: false, reason: "not_an_object", bytes: 0 };
   }
@@ -74,65 +132,51 @@ export function sanitizePatch_v1(input: unknown, opts: SanitizeOptionsV1 = {}): 
 
   // text
   if ("text" in input) {
-    const v = (input as Record<string, unknown>).text;
+    const v = (input as any).text;
     if (typeof v === "string") out.text = v.slice(0, maxTextChars);
     else droppedPaths.push("text");
   }
 
-  // settings allowlist
+  // settings
   if ("settings" in input) {
-    const s = (input as Record<string, unknown>).settings;
+    const s = (input as any).settings;
     if (isPlainObject(s)) {
       const o: OverlaySettingsPatchV1 = {};
-
-      if ("fontSize" in s) {
-        const v = s.fontSize;
-        if (typeof v === "number") o.fontSize = clamp(v, 10, 120);
-        else droppedPaths.push("settings.fontSize");
-      }
-      if ("speed" in s) {
-        const v = s.speed;
-        if (typeof v === "number") o.speed = clamp(v, 0.25, 5);
-        else droppedPaths.push("settings.speed");
-      }
-      if ("lineHeight" in s) {
-        const v = s.lineHeight;
-        if (typeof v === "number") o.lineHeight = clamp(v, 0.8, 3);
-        else droppedPaths.push("settings.lineHeight");
-      }
-      if ("width" in s) {
-        const v = s.width;
-        if (typeof v === "number") o.width = clamp(v, 200, 4000);
-        else droppedPaths.push("settings.width");
-      }
-      if ("mirror" in s) {
-        const v = s.mirror;
-        if (typeof v === "boolean") o.mirror = v;
-        else droppedPaths.push("settings.mirror");
-      }
-      if ("opacity" in s) {
-        const v = s.opacity;
-        if (typeof v === "number") o.opacity = clamp(v, 0, 1);
-        else droppedPaths.push("settings.opacity");
-      }
-
-      if (Object.keys(o).length > 0) out.settings = o;
+      if ("fontSize" in s) typeof s.fontSize === "number" ? (o.fontSize = clamp(s.fontSize, 10, 120)) : droppedPaths.push("settings.fontSize");
+      if ("speed" in s) typeof s.speed === "number" ? (o.speed = clamp(s.speed, 0.25, 5)) : droppedPaths.push("settings.speed");
+      if ("lineHeight" in s) typeof s.lineHeight === "number" ? (o.lineHeight = clamp(s.lineHeight, 0.8, 3)) : droppedPaths.push("settings.lineHeight");
+      if ("width" in s) typeof s.width === "number" ? (o.width = clamp(s.width, 200, 4000)) : droppedPaths.push("settings.width");
+      if ("mirror" in s) typeof s.mirror === "boolean" ? (o.mirror = s.mirror) : droppedPaths.push("settings.mirror");
+      if ("opacity" in s) typeof s.opacity === "number" ? (o.opacity = clamp(s.opacity, 0, 1)) : droppedPaths.push("settings.opacity");
+      if (Object.keys(o).length) out.settings = o;
       else droppedPaths.push("settings");
     } else {
       droppedPaths.push("settings");
     }
   }
 
-  // Guidance is explicitly dropped in v1 strict
-  if ("guidance" in input) droppedPaths.push("guidance");
+  // guidance.items
+  if ("guidance" in input) {
+    const g = (input as any).guidance;
+    if (isPlainObject(g) && Array.isArray((g as any).items)) {
+      const itemsRaw = ((g as any).items as unknown[]).slice(0, maxGuidanceItems);
+      const items: CoreGuidanceItemV1[] = [];
+      itemsRaw.forEach((it, idx) => {
+        const clean = sanitizeGuidanceItem(it, droppedPaths, idx);
+        if (clean) items.push(clean);
+      });
+      if (items.length) out.guidance = { items };
+      else droppedPaths.push("guidance.items");
+    } else {
+      droppedPaths.push("guidance");
+    }
+  }
 
-  // Reject empty patches
   if (Object.keys(out).length === 0) {
     return { ok: false, reason: "no_allowed_fields", bytes: rawBytes, detailSafe: "no allowlisted keys" };
   }
 
-  // Post-sanitize size gate
-  const outBytes = Buffer.byteLength(JSON.stringify(out), "utf8");
+  const outBytes = byteLen(JSON.stringify(out));
   if (outBytes > maxBytes) return { ok: false, reason: "payload_too_large", bytes: outBytes };
 
   return { ok: true, patch: out, bytes: outBytes, droppedPaths };

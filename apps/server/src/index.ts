@@ -19,6 +19,11 @@ import { emitLog } from "./obs/emitLog";
 import { arbitrateV1 } from "./arbitration/arbitration_v1";
 import { writeSalesforceNote } from "./integrations/salesforce_stub";
 import { writeHubspotNote } from "./integrations/hubspot_stub";
+import { createSessionMemory, updateTranscript } from "./arbitration/session_memory_v1";
+import { detectMomentV1 } from "./arbitration/moment_detector_v1";
+import { pickPlaybookV1 } from "./arbitration/playbooks_v1";
+import { inferStageV1 } from "./arbitration/stage_detector_v1";
+import { buildCoachOverlayPatchV1 } from "./arbitration/coach_engine_pro_v1";
 
 type SessionCtx = {
   sessionId: string;
@@ -26,6 +31,7 @@ type SessionCtx = {
   repId: string;
   controls: GuidanceControls;
   seq: number;
+  memory: ReturnType<typeof createSessionMemory>;
 };
 
 const DEFAULT_CONTROLS: GuidanceControls = {
@@ -51,8 +57,29 @@ app.post("/api/demo/transcript_final", async (req, res) => {
   if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
 
   const { session_id, text } = parsed.data;
-  const ctx = sessions.get(session_id);
-  if (!ctx) return res.status(404).json({ ok: false, error: "unknown_session" });
+
+  let ctx = sessions.get(session_id) as any;
+  if (!ctx) {
+    // Demo convenience: auto-create a session context when missing
+    ctx = {
+      tenantId: "tenant_demo",
+      repId: "rep_demo",
+      sessionId: session_id,
+      seq: 0,
+      controls: CONFIG.defaultControls,
+      memory: createSessionMemory(),
+    } as any;
+
+    sessions.set(session_id, ctx as any);
+    await emitLog({
+      tenantId: ctx.tenantId,
+      repId: ctx.repId,
+      session_id: ctx.sessionId,
+      service: "server",
+      eventType: "session_autocreated",
+      data: { via: "api/demo/transcript_final" }
+    });
+  }
 
   await onTranscriptFinal(ctx, text);
   return res.json({ ok: true });
@@ -145,6 +172,19 @@ function broadcast(sessionId: string, msg: WsServerMessageV1) {
 async function onTranscriptFinal(ctx: SessionCtx, text: string) {
   ctx.seq += 1;
 
+  // Safety: ensure memory exists (demo routes may call onTranscriptFinal without WS ctx init)
+  if (!ctx.memory) ctx.memory = createSessionMemory();
+
+  // Safety: ensure memory exists (demo routes may call onTranscriptFinal without WS ctx init)
+  if (!ctx.memory) ctx.memory = createSessionMemory();
+
+  // Throttle: no more than 1 suggestion per 3 seconds per session
+  const now = Date.now();
+  if (ctx.memory.lastSuggestionAt && now - ctx.memory.lastSuggestionAt < 3000) {
+    return;
+  }
+  ctx.memory.lastSuggestionAt = now;
+
   const transcriptHash = crypto.createHash("sha256").update(text.toLowerCase()).digest("hex");
   await emitLog({
     tenantId: ctx.tenantId,
@@ -157,11 +197,24 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string) {
 
   broadcast(ctx.sessionId, { type: "transcript_final", session_id: ctx.sessionId, seq: ctx.seq, at: new Date().toISOString(), text });
 
-  const decision = arbitrateV1({ text, controls: ctx.controls, domainKeywords: ["security", "soc2", "crm", "integration"] });
+  // Coach engine (Path A): stage + moment + micro-goal + product packs + confidence + guidance items
+  const built = await buildCoachOverlayPatchV1({
+    tenantId: ctx.tenantId,
+    repId: ctx.repId,
+    sessionId: ctx.sessionId,
+    controls: ctx.controls,
+    memory: ctx.memory,
+    text
+  });
 
-  // v1 strict: we patch the overlay text directly (guidance patching can be enabled later once schemas align).
-  const suggestionText = ((decision as any)?.items?.[0]?.suggestedText ?? (decision as any)?.items?.[0]?.text ?? "").toString();
-  const rawPatch = { text: suggestionText.length ? suggestionText : "Ask a clarifying question and reflect their concern." };
+  if (built.suppressed) {
+    await emitLog({ tenantId: ctx.tenantId, repId: ctx.repId, session_id: ctx.sessionId, service: "server", eventType: "suggestion_suppressed", data: built.meta });
+    return;
+  }
+
+  await emitLog({ tenantId: ctx.tenantId, repId: ctx.repId, session_id: ctx.sessionId, service: "server", eventType: "coach_decision", data: built.meta });
+
+  const rawPatch = built.rawPatch;
 
   const s = sanitizePatch_v1(rawPatch);
   if (!s.ok) {
@@ -216,7 +269,7 @@ wss.on("connection", (ws) => {
       const repId = String(raw.repId ?? "");
       if (!sessionId || !tenantId || !repId) return;
 
-      const ctx: SessionCtx = { sessionId, tenantId, repId, controls: { ...DEFAULT_CONTROLS }, seq: 0 };
+      const ctx: SessionCtx = { sessionId, tenantId, repId, controls: { ...DEFAULT_CONTROLS }, seq: 0, memory: createSessionMemory() };
 
       sessions.set(sessionId, ctx);
       if (!socketsBySession.has(sessionId)) socketsBySession.set(sessionId, new Set());

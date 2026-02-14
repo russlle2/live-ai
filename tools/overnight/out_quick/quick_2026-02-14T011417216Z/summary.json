@@ -1,0 +1,24 @@
+{
+  "runId": "quick_2026-02-14T011417216Z",
+  "sessions": 240,
+  "turnsPer": 24,
+  "totalTurns": 5760,
+  "suppressed": 135,
+  "suppressedRate": 0.0234375,
+  "moments": {
+    "unknown": 3549,
+    "competitor": 783,
+    "integration": 441,
+    "price": 327,
+    "deployment": 105,
+    "timeline": 66,
+    "security": 342,
+    "value": 96,
+    "stakeholder": 51
+  },
+  "confidenceBands": {
+    "low": 4113,
+    "medium": 1647
+  },
+  "usedProductPackTurns": 5760
+}
