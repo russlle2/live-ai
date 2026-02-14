@@ -1,6 +1,7 @@
 import http from "http";
 import crypto from "crypto";
 import express from "express";
+import { maybeBuildOfftopicBridgePatchV1 } from "./arbitration/pro/offtopic_bridge_v1";
 import cors from "cors";
 import { WebSocketServer } from "ws";
 import { z } from "zod";
@@ -14,6 +15,7 @@ import {
 } from "@overlay-assistant/shared";
 
 import { CONFIG, ARBITRATION_LOCUS } from "./config";
+import { requireApiKeyForApiV1, checkApiKeyForWsStartV1 } from "./auth/api_key_v1";
 import { upsertSession, endSession, getTrustSummaryForTenant } from "./db/queries";
 import { emitLog } from "./obs/emitLog";
 import { arbitrateV1 } from "./arbitration/arbitration_v1";
@@ -44,6 +46,7 @@ const DEFAULT_CONTROLS: GuidanceControls = {
 const app = express();
 app.use(express.json({ limit: "256kb" }));
 app.use(cors({ origin: CONFIG.webOrigin, credentials: true }));
+app.use("/api", requireApiKeyForApiV1);
 
 app.get("/health", (_req, res) => res.json({ ok: true, arbitrationLocus: ARBITRATION_LOCUS }));
 
@@ -198,7 +201,7 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string) {
   broadcast(ctx.sessionId, { type: "transcript_final", session_id: ctx.sessionId, seq: ctx.seq, at: new Date().toISOString(), text });
 
   // Coach engine (Path A): stage + moment + micro-goal + product packs + confidence + guidance items
-  const built = await buildCoachOverlayPatchV1({
+  let built = await buildCoachOverlayPatchV1({
     tenantId: ctx.tenantId,
     repId: ctx.repId,
     sessionId: ctx.sessionId,
@@ -207,6 +210,23 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string) {
     text
   });
 
+  // Track last primary sales moment for off-topic bridges (integration/price/security/etc.)
+  const m0 = (built as any)?.meta?.moment;
+  if (m0 && m0 !== "unknown" && m0 !== "offtopic") (ctx.memory as any).lastPrimaryMoment = m0;
+
+  // Rare behavior: if the buyer drifts into small-talk/off-topic, acknowledge briefly then pivot back.
+  const off = maybeBuildOfftopicBridgePatchV1({
+    text,
+    stage: (built as any)?.meta?.stage,
+    moment: m0,
+    memory: ctx.memory as any,
+  });
+  if (off) {
+    built = { ...(built as any), suppressed: false, patch: off.patch, meta: off.meta, decision: { ...(built as any)?.decision, offtopic: off.note } };
+    await emitLog({ tenantId: ctx.tenantId, repId: ctx.repId, session_id: ctx.sessionId, service: "server", eventType: "offtopic_bridge_applied", data: { category: off.note.category, anchorMoment: off.note.anchorMoment ?? null, offScore: off.note.offScore, salesScore: off.note.salesScore } });
+  }
+
+
   if (built.suppressed) {
     await emitLog({ tenantId: ctx.tenantId, repId: ctx.repId, session_id: ctx.sessionId, service: "server", eventType: "suggestion_suppressed", data: built.meta });
     return;
@@ -214,7 +234,7 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string) {
 
   await emitLog({ tenantId: ctx.tenantId, repId: ctx.repId, session_id: ctx.sessionId, service: "server", eventType: "coach_decision", data: built.meta });
 
-  const rawPatch = built.rawPatch;
+  const rawPatch = (built as any).patch ?? (built as any).rawPatch;
 
   const s = sanitizePatch_v1(rawPatch);
   if (!s.ok) {
@@ -264,6 +284,7 @@ wss.on("connection", (ws) => {
     const type = raw.type as WsClientMessageV1["type"];
 
     if (type === "start") {
+      if (!checkApiKeyForWsStartV1(raw, ws)) return;
       const sessionId = String(raw.session_id ?? "");
       const tenantId = String(raw.tenantId ?? "");
       const repId = String(raw.repId ?? "");

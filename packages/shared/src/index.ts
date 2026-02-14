@@ -3,3 +3,4 @@ export * from "./protocol/ws_messages_v1";
 export * from "./protocol/overlay_messages_v1";
 export * from "./protocol/failure_codes_v1";
 export * from "./sanitize/sanitizePatch_v1";
+export * from "./coach/offtrack_bridge_v1";

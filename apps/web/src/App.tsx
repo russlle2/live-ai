@@ -22,6 +22,7 @@ const DEFAULT_STATE: OverlayStateV1 = {
 };
 
 export function App() {
+  const apiKey = (import.meta as any).env?.VITE_OVERLAY_API_KEY as string | undefined;
   const [tab, setTab] = useState<"demo" | "trust">("demo");
   const [tenantId, setTenantId] = useState("tenant_demo");
   const [repId, setRepId] = useState("rep_demo");
@@ -97,7 +98,7 @@ export function App() {
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "start", session_id: sessionId, tenantId, repId }));
+      ws.send(JSON.stringify({ type: "start", session_id: sessionId, tenantId, repId, apiKey }));
     };
 
     ws.onmessage = async (ev) => {
@@ -130,7 +131,7 @@ export function App() {
     setInputText("");
     await fetch("http://localhost:8080/api/demo/transcript_final", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(apiKey ? { "x-overlay-key": apiKey } : {}) },
       body: JSON.stringify({ session_id: sessionId, text })
     });
   };

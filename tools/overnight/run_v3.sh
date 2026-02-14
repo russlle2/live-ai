@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Prefer local tsx via pnpm if tsx isn't globally available
+if command -v tsx >/dev/null 2>&1; then
+  TSX_RUN="tsx"
+else
+  TSX_RUN="pnpm -s exec tsx"
+fi
+
 # Run Overnight v3 from repo root.
 # Usage:
 #   bash tools/overnight/run_v3.sh --minutes 45 --sessions 300 --turns 10 --concurrency 2

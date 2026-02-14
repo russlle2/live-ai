@@ -112,7 +112,7 @@ export function applyToneToLineV1(line: string, tone: ToneProfileV1): string {
   }
   if (tone.id === "urgent") {
     out = hardTrim(out, 200);
-    if (!/\b(today|this week|right now|now\b/i.test(out)) {
+    if (!/\b(today|this week|right now|now)\b/i.test(out)) {
       out = `${out} If we have 2 minutes now, we can confirm the must‑haves.`;
     }
   }

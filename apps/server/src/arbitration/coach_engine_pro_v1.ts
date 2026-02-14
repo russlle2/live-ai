@@ -14,6 +14,7 @@ import { inferStageV1, updateMomentumV1 } from "./pro/momentum_pro_v1";
 import { inferToneProfileV1, applyToneToLineV1 } from "./pro/tone_pro_v1";
 import { computeSilenceCueV1, isDirectQuestionV1, markOutputEmittedV1, shouldSuppressOutputV1 } from "./pro/silence_pro_v1";
 import type { ProMetaV1, SalesStageV1 } from "./pro/types_pro_v1";
+import { applyOfftrackBridgeV1 } from "@overlay-assistant/shared";
 
 function clamp01(x: number): number {
   return Math.max(0, Math.min(1, x));
@@ -245,6 +246,26 @@ export async function buildCoachOverlayPatchV1(args: {
     text: line,
     guidance: { items: [item] }
   };
+
+  // Off-track bridge (rare): acknowledge + tie back if buyer drifts or asks metaphor.
+  try {
+    if ((patch as any)?.text && typeof (patch as any).text === "string") {
+      const bridged = applyOfftrackBridgeV1({ customerText: text, suggestedLine: (patch as any).text });
+      if (bridged.triggered) {
+        (patch as any).text = bridged.line;
+        if ((patch as any)?.guidance?.items && Array.isArray((patch as any).guidance.items)) {
+          (patch as any).guidance.items = (patch as any).guidance.items.map((it: any) =>
+            it && typeof it.text === "string"
+              ? ({ ...it, text: applyOfftrackBridgeV1({ customerText: text, suggestedLine: it.text }).line })
+              : it
+          );
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
 
   return {
     suppressed: false,
