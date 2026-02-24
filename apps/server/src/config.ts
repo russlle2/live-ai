@@ -19,6 +19,8 @@ export const CONFIG = {
 
   databaseUrl: process.env.DATABASE_URL || "postgres://user@localhost:5432/user",
   sttMockIntervalMs: Number(process.env.STT_MOCK_INTERVAL_MS || 4000),
+    retentionPruneEnabled: (process.env.RETENTION_PRUNE_ENABLED || "true") === "true",
+    retentionPruneIntervalMs: Math.max(60_000, Number(process.env.RETENTION_PRUNE_INTERVAL_MS || 900_000)),
 
   sttMock: (process.env.STT_MOCK || "true") === "true",
 

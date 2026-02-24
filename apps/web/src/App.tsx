@@ -3,6 +3,8 @@ import type { OverlayMessageV1, OverlayStateV1, WsServerMessageV1 } from "@overl
 import { sanitizePatch_v1 } from "@overlay-assistant/shared";
 import { OverlayPreview } from "./components/OverlayPreview";
 import { TrustDashboard } from "./components/TrustDashboard";
+import { SetupPanel } from "./components/SetupPanel";
+import { LiveAudioPanel } from "./components/LiveAudioPanel";
 import { postUiEvent } from "./lib/api";
 
 function newId(prefix: string) {
@@ -23,16 +25,20 @@ const DEFAULT_STATE: OverlayStateV1 = {
 
 export function App() {
   const apiKey = (import.meta as any).env?.VITE_OVERLAY_API_KEY as string | undefined;
-  const [tab, setTab] = useState<"demo" | "trust">("demo");
+  const [tab, setTab] = useState<"demo" | "trust" | "audio">("demo");
   const [tenantId, setTenantId] = useState("tenant_demo");
   const [repId, setRepId] = useState("rep_demo");
   const [sessionId, setSessionId] = useState(() => newId("sess"));
   const [wsStatus, setWsStatus] = useState<"disconnected" | "connecting" | "ready">("disconnected");
+  const [ws, setWs] = useState<WebSocket | null>(null);
   const [transcript, setTranscript] = useState<string[]>([]);
   const [overlayState, setOverlayState] = useState<OverlayStateV1>(DEFAULT_STATE);
   const [inputText, setInputText] = useState("");
   const [lastOverlayMessage, setLastOverlayMessage] = useState<any>(null);
   const [lastPatchPayload, setLastPatchPayload] = useState<any>(null);
+  const [connectedDevices, setConnectedDevices] = useState<Array<{ id: string; type: string; name?: string }>>([]);
+  const [lastCorrection, setLastCorrection] = useState<string>("");
+  const [latestTimelineEvent, setLatestTimelineEvent] = useState<any>(null);
 
   const wsUrl = useMemo(() => {
     const host = window.location.hostname;
@@ -95,13 +101,13 @@ export function App() {
 
   const connect = () => {
     setWsStatus("connecting");
-    const ws = new WebSocket(wsUrl);
+    const next = new WebSocket(wsUrl);
 
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "start", session_id: sessionId, tenantId, repId, apiKey }));
+    next.onopen = () => {
+      next.send(JSON.stringify({ type: "start", session_id: sessionId, tenantId, repId, apiKey, deviceType: "desktop", clientName: "desktop-overlay", role: "host" }));
     };
 
-    ws.onmessage = async (ev) => {
+    next.onmessage = async (ev) => {
       const msg = JSON.parse(ev.data) as WsServerMessageV1;
 
       if (msg.type === "ready") {
@@ -120,9 +126,39 @@ export function App() {
         handleOverlayMessage(msg.message as any);
         return;
       }
+
+      if (msg.type === "session_state") {
+        setConnectedDevices(msg.state.connectedDevices as any);
+        setOverlayState((s) => ({ ...s, settings: { ...s.settings, controls: msg.state.controls } }));
+        return;
+      }
+
+      if (msg.type === "correction") {
+        setLastCorrection(msg.correction.note);
+        return;
+      }
+
+      if (msg.type === "timeline_event") {
+        setLatestTimelineEvent({ at: msg.at, event: msg.event });
+      }
     };
 
-    ws.onclose = () => setWsStatus("disconnected");
+    next.onclose = () => {
+      setWsStatus("disconnected");
+      setWs(null);
+    };
+
+    setWs(next);
+  };
+
+  const sendControl = (action: string, value?: string | boolean | number | null) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "control", action, value: value ?? null, source: "desktop", session_id: sessionId, at: new Date().toISOString() }));
+  };
+
+  const sendLearning = (outcome: "helpful" | "unhelpful" | "ignored") => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "learning_signal", source: "desktop", outcome, session_id: sessionId, at: new Date().toISOString() }));
   };
 
   const sendTranscript = async () => {
@@ -142,38 +178,45 @@ export function App() {
 
   const onApply = async (itemId: string) => {
     await postUiEvent({ tenantId, repId, sessionId, eventType: "suggestion_applied", data: { itemId } });
+    sendLearning("helpful");
   };
 
   const onDismiss = async (itemId: string) => {
     await postUiEvent({ tenantId, repId, sessionId, eventType: "suggestion_dismissed", data: { itemId } });
+    sendLearning("unhelpful");
     setOverlayState((s) => ({ ...s, guidance: { ...s.guidance, items: s.guidance.items.filter((x) => x.id !== itemId) } }));
     setOverlayState((s: any) => ({ ...s, text: "" }));
   };
 
   const onMuteToggle = async () => {
     const muted = !overlayState.settings.controls.guidanceMuted;
-    setOverlayState((s) => ({ ...s, settings: { ...s.settings, controls: { ...s.settings.controls, guidanceMuted: muted } } }));
+    sendControl("toggle_mute");
     await postUiEvent({ tenantId, repId, sessionId, eventType: muted ? "mute_on" : "mute_off", data: {} });
   };
 
   return (
-    <div style={{ fontFamily: "system-ui, sans-serif", padding: 16, maxWidth: 1100, margin: "0 auto" }}>
-      <h2>Overlay Assistant (foundation demo)</h2>
+    <div className="oa-web-shell">
+      <h2 className="oa-title">Overlay Assistant Universal Coach</h2>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+      <div className="oa-tabbar">
         <button onClick={() => setTab("demo")} disabled={tab === "demo"}>
           Demo
         </button>
         <button onClick={() => setTab("trust")} disabled={tab === "trust"}>
           Trust Dashboard
         </button>
+        <button onClick={() => setTab("audio")} disabled={tab === "audio"}>
+          Live Audio
+        </button>
       </div>
 
       {tab === "trust" ? (
         <TrustDashboard tenantId={tenantId} />
+      ) : tab === "audio" ? (
+        <LiveAudioPanel tenantId={tenantId} repId={repId} sessionId={sessionId} timelinePush={latestTimelineEvent} />
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-          <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
+        <div className="oa-grid">
+          <div className="oa-card">
             <h3>Session</h3>
             <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 8 }}>
               <label>Tenant</label>
@@ -186,6 +229,9 @@ export function App() {
 
             <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
               <button onClick={() => connect()}>Start Session</button>
+              <button onClick={() => sendControl("request_reframe")}>Reframe</button>
+              <button onClick={() => sendControl("set_guidance_mode", "assist")}>Assist</button>
+              <button onClick={() => sendControl("set_guidance_mode", "auto")}>Auto</button>
               <button
                 onClick={() => {
                   setSessionId(newId("sess"));
@@ -196,9 +242,18 @@ export function App() {
                 New Session ID
               </button>
               <div style={{ marginLeft: "auto", color: wsStatus === "ready" ? "green" : "#666" }}>
-                WS: <b>{wsStatus}</b>
+                <span className={wsStatus === "ready" ? "oa-status-ready" : "oa-subtle"}>WS:</span> <b>{wsStatus}</b>
               </div>
             </div>
+
+            <div style={{ marginTop: 8, fontSize: 12 }} className="oa-subtle">
+              Devices: {connectedDevices.map((d) => `${d.type}${d.name ? ` (${d.name})` : ""}`).join(", ") || "none"}
+            </div>
+            {lastCorrection ? (
+              <div className="oa-correction">
+                <b>Coach correction:</b> {lastCorrection}
+              </div>
+            ) : null}
 
             <h3 style={{ marginTop: 14 }}>Inject transcript_final</h3>
             <textarea
@@ -209,17 +264,21 @@ export function App() {
             />
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
               <button onClick={() => sendTranscript()}>Send transcript_final</button>
+              <button onClick={() => sendLearning("helpful")}>Mark helpful</button>
+              <button onClick={() => sendLearning("ignored")}>Mark ignored</button>
             </div>
 
             <h3 style={{ marginTop: 14 }}>Transcript stream</h3>
             <div style={{ fontSize: 13, color: "#333", whiteSpace: "pre-wrap" }}>
-              {transcript.length ? transcript.join("\n") : <span style={{ color: "#666" }}>No transcript yet.</span>}
+              {transcript.length ? transcript.join("\n") : <span className="oa-subtle">No transcript yet.</span>}
             </div>
+
+            <SetupPanel tenantId={tenantId} sessionId={sessionId} />
           </div>
 
-          <div style={{ padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
+          <div className="oa-card">
             <h3>Overlay preview</h3>
-            <div style={{ fontSize: 12, color: "#666", marginBottom: 6 }}>
+            <div style={{ fontSize: 12, marginBottom: 6 }} className="oa-subtle">
               UI state: guidance.items = {overlayState.guidance.items.length} • text = {String((overlayState as any).text ?? "").slice(0, 60)}
             </div>
 

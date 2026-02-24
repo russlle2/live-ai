@@ -11,16 +11,22 @@ import {
   type WsClientMessageV1,
   type WsServerMessageV1,
   type OverlayMessageV1,
-  type GuidanceControls
+  type GuidanceControls,
+  type ClientDeviceType,
+  type ClientRoleV1,
+  type CoachControlActionV1,
+  type CoachCorrectionMetaV1
 } from "@overlay-assistant/shared";
 
 import { CONFIG, ARBITRATION_LOCUS } from "./config";
 import { requireApiKeyForApiV1, checkApiKeyForWsStartV1 } from "./auth/api_key_v1";
-import { upsertSession, endSession, getTrustSummaryForTenant } from "./db/queries";
+import { upsertSession, endSession, getTrustSummaryForTenant, getPrivacyControls, upsertPrivacyControls, deleteSessionArtifacts, insertConversationTimelineEvent, getConversationTimeline, enforceRetentionPolicies } from "./db/queries";
 import { emitLog } from "./obs/emitLog";
 import { arbitrateV1 } from "./arbitration/arbitration_v1";
-import { writeSalesforceNote } from "./integrations/salesforce_stub";
-import { writeHubspotNote } from "./integrations/hubspot_stub";
+import { dispatchIntegrationEvent } from "./integrations/universal_dispatch";
+import { buildOauthAuthorizeUrl, exchangeOauthCode } from "./integrations/oauth_client";
+import { createOauthState, consumeOauthState, upsertOauthTokens, type OAuthProvider, getOauthAccessToken } from "./integrations/oauth_store";
+import { analyzeConversationV1 } from "./conversation/ci_v1";
 import { createSessionMemory, updateTranscript } from "./arbitration/session_memory_v1";
 import { detectMomentV1 } from "./arbitration/moment_detector_v1";
 import { pickPlaybookV1 } from "./arbitration/playbooks_v1";
@@ -34,6 +40,11 @@ type SessionCtx = {
   controls: GuidanceControls;
   seq: number;
   memory: ReturnType<typeof createSessionMemory>;
+  connectedDevices: Map<string, { id: string; type: ClientDeviceType; role: ClientRoleV1; name?: string }>;
+  lastGuidance?: { stage?: string; moment?: string; lineHash?: string };
+  pendingCorrectionReason?: CoachCorrectionMetaV1["reason"];
+  learning: { helpful: number; unhelpful: number; ignored: number };
+  sttMockStarted?: boolean;
 };
 
 const DEFAULT_CONTROLS: GuidanceControls = {
@@ -42,6 +53,13 @@ const DEFAULT_CONTROLS: GuidanceControls = {
   aiDepth: "P0",
   showLowConfidence: false
 };
+
+let lastRetentionPruneState: {
+  at: string;
+  mode: "manual" | "scheduled";
+  result?: unknown;
+  error?: string;
+} | null = null;
 
 const app = express();
 app.use(express.json({ limit: "256kb" }));
@@ -136,11 +154,361 @@ app.get("/api/trust/summary", async (req, res) => {
   return res.json({ ok: true, summary });
 });
 
+app.get("/api/privacy/controls", async (req, res) => {
+  const tenantId = String(req.query.tenantId ?? "");
+  if (!tenantId) return res.status(400).json({ ok: false, error: "tenantId_required" });
+  const controls = await getPrivacyControls(tenantId);
+  return res.json({ ok: true, controls });
+});
+
+app.post("/api/privacy/controls", async (req, res) => {
+  const parsed = PrivacyControlsInput.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+  const body = parsed.data;
+  await upsertPrivacyControls(body);
+  await emitLog({
+    tenantId: body.tenantId,
+    repId: "system",
+    session_id: "privacy",
+    service: "server",
+    eventType: "privacy_controls_updated",
+    data: { transcriptOptOut: body.transcriptOptOut, encryptTranscriptFields: body.encryptTranscriptFields, retentionDays: body.retentionDays }
+  });
+  return res.json({ ok: true });
+});
+
+app.post("/api/privacy/delete-session", async (req, res) => {
+  const parsed = DeleteSessionInput.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+  const body = parsed.data;
+
+  const result = await deleteSessionArtifacts({ tenantId: body.tenantId, sessionId: body.sessionId });
+  await emitLog({
+    tenantId: body.tenantId,
+    repId: "system",
+    session_id: body.sessionId,
+    service: "server",
+    eventType: "privacy_delete_session",
+    data: result
+  });
+  return res.json({ ok: true, result });
+});
+
+app.post("/api/privacy/prune-retention", async (req, res) => {
+  const parsed = RetentionPruneInput.safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+  const body = parsed.data;
+
+  const result = await enforceRetentionPolicies({ tenantId: body.tenantId });
+  lastRetentionPruneState = {
+    at: new Date().toISOString(),
+    mode: "manual",
+    result
+  };
+  await emitLog({
+    tenantId: body.tenantId ?? "system",
+    repId: "system",
+    session_id: "retention",
+    service: "server",
+    eventType: "retention_prune_run",
+    data: result
+  });
+
+  return res.json({ ok: true, result });
+});
+
+app.get("/api/privacy/retention-status", async (req, res) => {
+  const tenantId = String(req.query.tenantId ?? "");
+  let tenantControls: any = null;
+  if (tenantId) {
+    tenantControls = await getPrivacyControls(tenantId);
+  }
+
+  return res.json({
+    ok: true,
+    scheduler: {
+      enabled: CONFIG.retentionPruneEnabled,
+      intervalMs: CONFIG.retentionPruneIntervalMs,
+      lastRun: lastRetentionPruneState
+    },
+    tenantControls
+  });
+});
+
+app.post("/api/live/audio_frame", async (req, res) => {
+  const parsed = LiveAudioFrameInput.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+  const body = parsed.data;
+
+  const isSpeaking = body.frameEnergy >= 0.32 || Boolean(body.partialText?.trim());
+  const finalText = (body.finalText ?? "").trim();
+  const privacy = await getPrivacyControls(body.tenantId);
+
+  const intel = finalText ? analyzeConversationV1(finalText) : { entities: [], moments: ["neutral"], complianceRisks: [], confidence: 0.3 };
+  const objections = (intel.entities || []).filter((e: any) => e?.type === "objection_type").map((e: any) => String(e?.value ?? ""));
+
+  if (finalText) {
+    const inserted = await insertConversationTimelineEvent({
+      tenantId: body.tenantId,
+      sessionId: body.sessionId,
+      source: "audio_frame",
+      textExcerpt: privacy.transcriptOptOut ? "" : finalText,
+      entities: intel.entities as any,
+      moments: (intel.moments as any[]).map((m) => String(m)),
+      objections,
+      complianceRisks: intel.complianceRisks as any,
+      confidence: Number(intel.confidence ?? 0)
+    });
+
+    broadcastTimelineEvent(body.sessionId, inserted as any);
+  }
+
+  if (finalText && !privacy.transcriptOptOut) {
+    let ctx = sessions.get(body.sessionId) as any;
+    if (!ctx) {
+      ctx = {
+        tenantId: body.tenantId,
+        repId: body.repId,
+        sessionId: body.sessionId,
+        seq: 0,
+        controls: CONFIG.defaultControls,
+        memory: createSessionMemory(),
+        connectedDevices: new Map(),
+        learning: { helpful: 0, unhelpful: 0, ignored: 0 }
+      } as any;
+      sessions.set(body.sessionId, ctx as any);
+    }
+    await onTranscriptFinal(ctx, finalText);
+  }
+
+  await emitLog({
+    tenantId: body.tenantId,
+    repId: body.repId,
+    session_id: body.sessionId,
+    service: "server",
+    eventType: "audio_frame_processed",
+    data: {
+      vadSpeaking: isSpeaking,
+      hasFinalText: Boolean(finalText),
+      transcriptOptOut: privacy.transcriptOptOut,
+      complianceRiskCount: intel.complianceRisks.length,
+      confidence: intel.confidence
+    }
+  });
+
+  return res.json({
+    ok: true,
+    vad: { isSpeaking, frameEnergy: body.frameEnergy },
+    stt: { partialText: body.partialText ?? "", finalText: privacy.transcriptOptOut ? "" : finalText },
+    intelligence: intel,
+    privacy: {
+      transcriptOptOut: privacy.transcriptOptOut,
+      encryptTranscriptFields: privacy.encryptTranscriptFields,
+      retentionDays: privacy.retentionDays
+    }
+  });
+});
+
+app.post("/api/conversation/intel", async (req, res) => {
+  const parsed = ConversationIntelInput.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+  const body = parsed.data;
+  const intel = analyzeConversationV1(body.text);
+  const objections = (intel.entities || []).filter((e: any) => e?.type === "objection_type").map((e: any) => String(e?.value ?? ""));
+
+  const privacy = await getPrivacyControls(body.tenantId);
+  const inserted = await insertConversationTimelineEvent({
+    tenantId: body.tenantId,
+    sessionId: body.sessionId,
+    source: "conversation_intel",
+    textExcerpt: privacy.transcriptOptOut ? "" : body.text,
+    entities: intel.entities as any,
+    moments: (intel.moments as any[]).map((m) => String(m)),
+    objections,
+    complianceRisks: intel.complianceRisks as any,
+    confidence: Number(intel.confidence ?? 0)
+  });
+
+  broadcastTimelineEvent(body.sessionId, inserted as any);
+
+  await emitLog({
+    tenantId: body.tenantId,
+    repId: "system",
+    session_id: body.sessionId,
+    service: "server",
+    eventType: "conversation_intel_generated",
+    data: { entityCount: intel.entities.length, momentCount: intel.moments.length, complianceRiskCount: intel.complianceRisks.length, confidence: intel.confidence }
+  });
+  return res.json({ ok: true, intelligence: intel });
+});
+
+app.get("/api/conversation/timeline", async (req, res) => {
+  const tenantId = String(req.query.tenantId ?? "");
+  const sessionId = String(req.query.sessionId ?? "");
+  const limit = Number(req.query.limit ?? 80);
+  const sinceId = Number(req.query.sinceId ?? 0);
+  if (!tenantId) return res.status(400).json({ ok: false, error: "tenantId_required" });
+  if (!sessionId) return res.status(400).json({ ok: false, error: "sessionId_required" });
+
+  const items = await getConversationTimeline({
+    tenantId,
+    sessionId,
+    limit,
+    sinceId: Number.isFinite(sinceId) && sinceId > 0 ? sinceId : undefined
+  });
+  const nextSinceId = items.reduce((mx, item: any) => Math.max(mx, Number(item?.id ?? 0)), Math.max(0, Number.isFinite(sinceId) ? sinceId : 0));
+  return res.json({ ok: true, items, nextSinceId });
+});
+
 const IntegrationInput = z.object({
   tenantId: z.string().min(1),
-  integration: z.enum(["salesforce", "hubspot"]),
+  integration: z.enum(["salesforce", "hubspot", "zoom", "google_meet", "google_workspace", "bluetooth_bridge", "server_webhook"]),
   idempotencyKey: z.string().min(8),
   payload: z.record(z.any())
+});
+
+const OAuthStartInput = z.object({
+  tenantId: z.string().min(1),
+  provider: z.enum(["zoom", "google"]),
+  redirectUri: z.string().url()
+});
+
+const OAuthCallbackInput = z.object({
+  tenantId: z.string().min(1),
+  provider: z.enum(["zoom", "google"]),
+  code: z.string().min(1),
+  state: z.string().min(4),
+  redirectUri: z.string().url()
+});
+
+const LiveAudioFrameInput = z.object({
+  tenantId: z.string().min(1),
+  repId: z.string().min(1),
+  sessionId: z.string().min(1),
+  frameEnergy: z.number().min(0).max(1),
+  partialText: z.string().max(300).optional(),
+  finalText: z.string().max(2000).optional(),
+  language: z.string().max(20).optional()
+});
+
+const ConversationIntelInput = z.object({
+  tenantId: z.string().min(1),
+  sessionId: z.string().min(1),
+  text: z.string().min(1).max(4000)
+});
+
+const PrivacyControlsInput = z.object({
+  tenantId: z.string().min(1),
+  transcriptOptOut: z.boolean(),
+  encryptTranscriptFields: z.boolean(),
+  retentionDays: z.number().int().min(1).max(3650)
+});
+
+const DeleteSessionInput = z.object({
+  tenantId: z.string().min(1),
+  sessionId: z.string().min(1)
+});
+
+const RetentionPruneInput = z.object({
+  tenantId: z.string().min(1).optional()
+});
+
+app.post("/api/integrations/oauth/start", async (req, res) => {
+  const parsed = OAuthStartInput.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+  const body = parsed.data;
+
+  const state = await createOauthState({
+    tenantId: body.tenantId,
+    provider: body.provider as OAuthProvider,
+    redirectUri: body.redirectUri
+  });
+
+  let authUrl = "";
+  try {
+    authUrl = buildOauthAuthorizeUrl({
+      provider: body.provider as OAuthProvider,
+      redirectUri: body.redirectUri,
+      stateToken: state.stateToken,
+      tenantId: body.tenantId
+    });
+  } catch (e: any) {
+    return res.status(400).json({ ok: false, error: String(e?.message ?? "oauth_provider_not_configured") });
+  }
+
+  await emitLog({
+    tenantId: body.tenantId,
+    repId: "system",
+    session_id: "oauth",
+    service: "server",
+    eventType: "oauth_start",
+    data: { provider: body.provider }
+  });
+
+  return res.json({ ok: true, authUrl, state: `${body.tenantId}:${state.stateToken}`, expiresAt: state.expiresAtIso });
+});
+
+app.post("/api/integrations/oauth/callback", async (req, res) => {
+  const parsed = OAuthCallbackInput.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+  const body = parsed.data;
+
+  const [tenantFromState, stateToken] = String(body.state).split(":", 2);
+  if (!tenantFromState || !stateToken || tenantFromState !== body.tenantId) {
+    return res.status(400).json({ ok: false, error: "oauth_state_invalid" });
+  }
+
+  const consumed = await consumeOauthState({
+    tenantId: body.tenantId,
+    provider: body.provider as OAuthProvider,
+    stateToken,
+    redirectUri: body.redirectUri
+  });
+  if (!consumed) return res.status(400).json({ ok: false, error: "oauth_state_expired_or_used" });
+
+  let exchanged;
+  try {
+    exchanged = await exchangeOauthCode({
+      provider: body.provider as OAuthProvider,
+      code: body.code,
+      redirectUri: body.redirectUri
+    });
+  } catch (e: any) {
+    return res.status(400).json({ ok: false, error: String(e?.message ?? "oauth_exchange_failed") });
+  }
+
+  await upsertOauthTokens({
+    tenantId: body.tenantId,
+    provider: body.provider as OAuthProvider,
+    subjectId: exchanged.subjectId,
+    accessToken: exchanged.accessToken,
+    refreshToken: exchanged.refreshToken,
+    tokenType: exchanged.tokenType,
+    scope: exchanged.scope,
+    expiresInSec: exchanged.expiresInSec,
+    metadata: { provider: body.provider }
+  });
+
+  await emitLog({
+    tenantId: body.tenantId,
+    repId: "system",
+    session_id: "oauth",
+    service: "server",
+    eventType: "oauth_connected",
+    data: { provider: body.provider }
+  });
+
+  return res.json({ ok: true, connected: true, provider: body.provider });
+});
+
+app.get("/api/integrations/oauth/status", async (req, res) => {
+  const tenantId = String(req.query.tenantId ?? "");
+  const provider = String(req.query.provider ?? "") as OAuthProvider;
+  if (!tenantId) return res.status(400).json({ ok: false, error: "tenantId_required" });
+  if (provider !== "zoom" && provider !== "google") return res.status(400).json({ ok: false, error: "provider_invalid" });
+
+  const token = await getOauthAccessToken({ tenantId, provider });
+  return res.json({ ok: true, connected: Boolean(token), provider });
 });
 
 app.post("/api/integrations/write-note", async (req, res) => {
@@ -150,7 +518,7 @@ app.post("/api/integrations/write-note", async (req, res) => {
 
   const req0 = { tenantId: body.tenantId, integration: body.integration, idempotencyKey: body.idempotencyKey, payload: body.payload };
 
-  const result = body.integration === "salesforce" ? await writeSalesforceNote(req0) : await writeHubspotNote(req0);
+  const result = await dispatchIntegrationEvent(req0);
   return res.json({ ok: true, result });
 });
 
@@ -159,6 +527,13 @@ const wss = new WebSocketServer({ server, path: CONFIG.wsPath });
 
 const sessions = new Map<string, SessionCtx>();
 const socketsBySession = new Map<string, Set<any>>();
+const socketSessionMeta = new Map<any, { sessionId: string; deviceId: string; role: ClientRoleV1; lastControlAtMs: number; controlBurst: number }>();
+
+const CONTROL_ACTIONS_BY_ROLE: Record<ClientRoleV1, Set<CoachControlActionV1>> = {
+  host: new Set(["toggle_mute", "set_guidance_mode", "set_ai_depth", "accept_current", "dismiss_current", "request_reframe", "mark_helpful", "mark_unhelpful"]),
+  controller: new Set(["toggle_mute", "set_guidance_mode", "set_ai_depth", "accept_current", "dismiss_current", "request_reframe", "mark_helpful", "mark_unhelpful"]),
+  viewer: new Set(["accept_current", "dismiss_current", "mark_helpful", "mark_unhelpful"])
+};
 
 function safeJsonParse(s: string): any | null {
   try { return JSON.parse(s); } catch { return null; }
@@ -172,7 +547,122 @@ function broadcast(sessionId: string, msg: WsServerMessageV1) {
   }
 }
 
+function toLineHash(line: string): string {
+  return crypto.createHash("sha256").update(line.trim().toLowerCase()).digest("hex");
+}
+
+function emitSessionState(sessionId: string) {
+  const ctx = sessions.get(sessionId);
+  if (!ctx) return;
+  const devices = Array.from(ctx.connectedDevices.values()).map((d) => ({ id: d.id, type: d.type, role: d.role, name: d.name }));
+  broadcast(sessionId, {
+    type: "session_state",
+    session_id: sessionId,
+    at: new Date().toISOString(),
+    state: {
+      controls: ctx.controls,
+      connectedDevices: devices
+    }
+  });
+}
+
+function broadcastTimelineEvent(sessionId: string, event: {
+  id: number;
+  createdAt: string;
+  source: string;
+  textExcerpt: string;
+  entities: Array<{ type: string; value: string; confidence?: number }>;
+  moments: string[];
+  objections: string[];
+  complianceRisks: Array<{ type: string; severity: string; phrase: string }>;
+  confidence: number;
+}) {
+  broadcast(sessionId, {
+    type: "timeline_event",
+    session_id: sessionId,
+    at: new Date().toISOString(),
+    event
+  });
+}
+
+function canRunControl(role: ClientRoleV1, action: CoachControlActionV1): boolean {
+  return CONTROL_ACTIONS_BY_ROLE[role]?.has(action) ?? false;
+}
+
+function tooManyControls(meta: { lastControlAtMs: number; controlBurst: number }): boolean {
+  const now = Date.now();
+  if (now - meta.lastControlAtMs > 3000) {
+    meta.lastControlAtMs = now;
+    meta.controlBurst = 1;
+    return false;
+  }
+  meta.controlBurst += 1;
+  meta.lastControlAtMs = now;
+  return meta.controlBurst > 12;
+}
+
+async function applyControlCommand(ctx: SessionCtx, action: CoachControlActionV1, value: unknown, source: ClientDeviceType) {
+  if (action === "toggle_mute") {
+    ctx.controls = { ...ctx.controls, guidanceMuted: !ctx.controls.guidanceMuted };
+  }
+  if (action === "set_guidance_mode" && (value === "assist" || value === "auto" || value === "off")) {
+    ctx.controls = { ...ctx.controls, guidanceMode: value };
+  }
+  if (action === "set_ai_depth" && (value === "P0" || value === "P1" || value === "P2" || value === "P3")) {
+    ctx.controls = { ...ctx.controls, aiDepth: value };
+  }
+  if (action === "request_reframe") {
+    ctx.pendingCorrectionReason = "user_reframe_request";
+    const last = ctx.memory?.transcriptWindow?.[ctx.memory.transcriptWindow.length - 1];
+    if (typeof last === "string" && last.trim()) {
+      await onTranscriptFinal(ctx, last);
+    }
+  }
+
+  await emitLog({
+    tenantId: ctx.tenantId,
+    repId: ctx.repId,
+    session_id: ctx.sessionId,
+    service: "server",
+    eventType: "coach_control",
+    data: { action, source, hasValue: value !== undefined && value !== null }
+  });
+
+  emitSessionState(ctx.sessionId);
+  const settings: OverlayMessageV1 = { type: "settings", settings: { controls: ctx.controls } };
+  broadcast(ctx.sessionId, { type: "overlay_message", session_id: ctx.sessionId, at: new Date().toISOString(), message: settings });
+}
+
+function applyLearningSignal(ctx: SessionCtx, outcome: "helpful" | "unhelpful" | "ignored") {
+  if (outcome === "helpful") ctx.learning.helpful += 1;
+  if (outcome === "unhelpful") ctx.learning.unhelpful += 1;
+  if (outcome === "ignored") ctx.learning.ignored += 1;
+
+  if (ctx.learning.helpful >= 3 && ctx.learning.helpful > ctx.learning.unhelpful) {
+    if (ctx.controls.aiDepth === "P0") ctx.controls = { ...ctx.controls, aiDepth: "P1" };
+    else if (ctx.controls.aiDepth === "P1") ctx.controls = { ...ctx.controls, aiDepth: "P2" };
+  }
+
+  if (ctx.learning.unhelpful >= 2 && ctx.learning.unhelpful >= ctx.learning.helpful) {
+    if (ctx.controls.aiDepth === "P3") ctx.controls = { ...ctx.controls, aiDepth: "P2" };
+    else if (ctx.controls.aiDepth === "P2") ctx.controls = { ...ctx.controls, aiDepth: "P1" };
+  }
+}
+
 async function onTranscriptFinal(ctx: SessionCtx, text: string) {
+  const privacy = await getPrivacyControls(ctx.tenantId);
+  if (privacy.transcriptOptOut) {
+    await emitLog({
+      tenantId: ctx.tenantId,
+      repId: ctx.repId,
+      session_id: ctx.sessionId,
+      service: "server",
+      eventType: "transcript_skipped_opt_out",
+      data: { textLen: text.length }
+    });
+    return;
+  }
+
   ctx.seq += 1;
 
   // Safety: ensure memory exists (demo routes may call onTranscriptFinal without WS ctx init)
@@ -196,6 +686,21 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string) {
     service: "server",
     eventType: "transcript_final_received",
     data: { transcriptHash, transcriptLen: text.length }
+  });
+
+  const intel = analyzeConversationV1(text);
+  await emitLog({
+    tenantId: ctx.tenantId,
+    repId: ctx.repId,
+    session_id: ctx.sessionId,
+    service: "server",
+    eventType: "conversation_intel",
+    data: {
+      entityCount: intel.entities.length,
+      moments: intel.moments,
+      complianceRiskCount: intel.complianceRisks.length,
+      confidence: intel.confidence
+    }
   });
 
   broadcast(ctx.sessionId, { type: "transcript_final", session_id: ctx.sessionId, seq: ctx.seq, at: new Date().toISOString(), text });
@@ -254,12 +759,61 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string) {
 
   await emitLog({ tenantId: ctx.tenantId, repId: ctx.repId, session_id: ctx.sessionId, service: "server", eventType: "patch_received", data: { bytes: (s as any).bytes } });
 
-  const overlayMsg: OverlayMessageV1 = { type: "patch", patch: (s as any).patch };
+  const patch = (s as any).patch as any;
+  const patchLine = typeof patch?.text === "string" && patch.text.trim()
+    ? patch.text.trim()
+    : (typeof patch?.guidance?.items?.[0]?.text === "string" ? patch.guidance.items[0].text : "");
+  const nextStage = typeof (built as any)?.meta?.stage === "string" ? (built as any).meta.stage : undefined;
+  const nextMoment = typeof (built as any)?.meta?.moment === "string" ? (built as any).meta.moment : undefined;
+  const nextLineHash = patchLine ? toLineHash(patchLine) : undefined;
+
+  const prev = ctx.lastGuidance;
+  const interpretationShift = Boolean(
+    prev
+    && nextLineHash
+    && prev.lineHash
+    && prev.lineHash !== nextLineHash
+    && ((prev.stage && nextStage && prev.stage !== nextStage) || (prev.moment && nextMoment && prev.moment !== nextMoment))
+  );
+
+  if ((interpretationShift || ctx.pendingCorrectionReason === "user_reframe_request") && nextLineHash) {
+    const correction: CoachCorrectionMetaV1 = {
+      reason: ctx.pendingCorrectionReason ?? "interpretation_shift",
+      from: prev,
+      to: { stage: nextStage, moment: nextMoment, lineHash: nextLineHash },
+      note: ctx.pendingCorrectionReason === "user_reframe_request"
+        ? "Reframed guidance based on live user request."
+        : "Adjusted guidance after new context shifted interpretation."
+    };
+    broadcast(ctx.sessionId, {
+      type: "correction",
+      session_id: ctx.sessionId,
+      at: new Date().toISOString(),
+      correction
+    });
+    await emitLog({
+      tenantId: ctx.tenantId,
+      repId: ctx.repId,
+      session_id: ctx.sessionId,
+      service: "server",
+      eventType: "coach_correction",
+      data: correction
+    });
+  }
+
+  ctx.pendingCorrectionReason = undefined;
+  if (nextLineHash) {
+    ctx.lastGuidance = { stage: nextStage, moment: nextMoment, lineHash: nextLineHash };
+  }
+
+  const overlayMsg: OverlayMessageV1 = { type: "patch", patch };
   broadcast(ctx.sessionId, { type: "overlay_message", session_id: ctx.sessionId, at: new Date().toISOString(), message: overlayMsg });
 }
 
 function startSttMock(ctx: SessionCtx) {
   if (!CONFIG.sttMock) return;
+  if (ctx.sttMockStarted) return;
+  ctx.sttMockStarted = true;
   const lines = [
     "Can you walk me through your decision process?",
     "We're concerned about SOC2 and data retention.",
@@ -277,6 +831,18 @@ function startSttMock(ctx: SessionCtx) {
 }
 
 wss.on("connection", (ws) => {
+  ws.on("close", () => {
+    const meta = socketSessionMeta.get(ws);
+    if (!meta) return;
+    socketSessionMeta.delete(ws);
+    socketsBySession.get(meta.sessionId)?.delete(ws);
+    const ctx = sessions.get(meta.sessionId);
+    if (ctx) {
+      ctx.connectedDevices.delete(meta.deviceId);
+      emitSessionState(meta.sessionId);
+    }
+  });
+
   ws.on("message", async (buf) => {
     const raw = safeJsonParse(String(buf));
     if (!raw || typeof raw.type !== "string") return;
@@ -290,11 +856,36 @@ wss.on("connection", (ws) => {
       const repId = String(raw.repId ?? "");
       if (!sessionId || !tenantId || !repId) return;
 
-      const ctx: SessionCtx = { sessionId, tenantId, repId, controls: { ...DEFAULT_CONTROLS }, seq: 0, memory: createSessionMemory() };
+      const deviceType: ClientDeviceType = raw.deviceType === "mobile" || raw.deviceType === "bluetooth_remote" ? raw.deviceType : "desktop";
+      const clientName = typeof raw.clientName === "string" ? raw.clientName.slice(0, 80) : undefined;
+      const role: ClientRoleV1 = raw.role === "viewer" || raw.role === "controller" || raw.role === "host"
+        ? raw.role
+        : (deviceType === "desktop" ? "host" : "controller");
+
+      const ctx: SessionCtx = sessions.get(sessionId) ?? {
+        sessionId,
+        tenantId,
+        repId,
+        controls: { ...DEFAULT_CONTROLS },
+        seq: 0,
+        memory: createSessionMemory(),
+        connectedDevices: new Map(),
+        learning: { helpful: 0, unhelpful: 0, ignored: 0 }
+      };
+
+      if (ctx.tenantId !== tenantId || ctx.repId !== repId) {
+        ws.send(JSON.stringify({ type: "error", at: new Date().toISOString(), code: "session_identity_mismatch", message: "session already bound to different tenant/rep", session_id: sessionId } satisfies WsServerMessageV1));
+        try { ws.close(1008, "session_identity_mismatch"); } catch {}
+        return;
+      }
 
       sessions.set(sessionId, ctx);
       if (!socketsBySession.has(sessionId)) socketsBySession.set(sessionId, new Set());
       socketsBySession.get(sessionId)!.add(ws);
+
+      const deviceId = `${deviceType}_${Math.random().toString(16).slice(2, 10)}`;
+      ctx.connectedDevices.set(deviceId, { id: deviceId, type: deviceType, role, name: clientName });
+      socketSessionMeta.set(ws, { sessionId, deviceId, role, lastControlAtMs: 0, controlBurst: 0 });
 
       await upsertSession({ sessionId, tenantId, repId });
 
@@ -304,6 +895,8 @@ wss.on("connection", (ws) => {
 
       const settings: OverlayMessageV1 = { type: "settings", settings: { controls: ctx.controls } };
       ws.send(JSON.stringify({ type: "overlay_message", session_id: sessionId, at: new Date().toISOString(), message: settings } satisfies WsServerMessageV1));
+
+      emitSessionState(sessionId);
 
       startSttMock(ctx);
       return;
@@ -318,8 +911,55 @@ wss.on("connection", (ws) => {
       const sessionId = String(raw.session_id ?? "");
       sessions.delete(sessionId);
       socketsBySession.get(sessionId)?.delete(ws);
+      socketSessionMeta.delete(ws);
       await endSession(sessionId);
       ws.close();
+      return;
+    }
+
+    if (type === "control") {
+      const meta = socketSessionMeta.get(ws);
+      const sessionId = String(raw.session_id ?? meta?.sessionId ?? "");
+      const ctx = sessions.get(sessionId);
+      if (!ctx) return;
+
+      if (!meta || meta.sessionId !== sessionId) {
+        ws.send(JSON.stringify({ type: "error", at: new Date().toISOString(), code: "invalid_session", message: "control requires active joined session", session_id: sessionId } satisfies WsServerMessageV1));
+        return;
+      }
+
+      if (tooManyControls(meta)) {
+        ws.send(JSON.stringify({ type: "error", at: new Date().toISOString(), code: "rate_limited", message: "too many control commands", session_id: sessionId } satisfies WsServerMessageV1));
+        return;
+      }
+
+      const source: ClientDeviceType = raw.source === "mobile" || raw.source === "bluetooth_remote" ? raw.source : "desktop";
+      const action = raw.action as CoachControlActionV1;
+      if (!canRunControl(meta.role, action)) {
+        ws.send(JSON.stringify({ type: "error", at: new Date().toISOString(), code: "forbidden_action", message: "device role cannot run this action", session_id: sessionId } satisfies WsServerMessageV1));
+        return;
+      }
+      await applyControlCommand(ctx, action, (raw as any).value, source);
+      return;
+    }
+
+    if (type === "learning_signal") {
+      const meta = socketSessionMeta.get(ws);
+      const sessionId = String(raw.session_id ?? meta?.sessionId ?? "");
+      const ctx = sessions.get(sessionId);
+      if (!ctx) return;
+      if (!meta || meta.sessionId !== sessionId) return;
+      const outcome = raw.outcome === "helpful" || raw.outcome === "unhelpful" ? raw.outcome : "ignored";
+      applyLearningSignal(ctx, outcome);
+      await emitLog({
+        tenantId: ctx.tenantId,
+        repId: ctx.repId,
+        session_id: ctx.sessionId,
+        service: "server",
+        eventType: "learning_signal",
+        data: { outcome, source: raw.source }
+      });
+      emitSessionState(ctx.sessionId);
       return;
     }
 
@@ -330,4 +970,44 @@ wss.on("connection", (ws) => {
 server.listen(CONFIG.port, () => {
   // eslint-disable-next-line no-console
   console.log(`[server] listening on http://localhost:${CONFIG.port}`);
+
+  if (CONFIG.retentionPruneEnabled) {
+    const runPrune = async () => {
+      try {
+        const result = await enforceRetentionPolicies();
+        lastRetentionPruneState = {
+          at: new Date().toISOString(),
+          mode: "scheduled",
+          result
+        };
+        await emitLog({
+          tenantId: "system",
+          repId: "system",
+          session_id: "retention",
+          service: "server",
+          eventType: "retention_prune_tick",
+          data: result
+        });
+      } catch (e: any) {
+        lastRetentionPruneState = {
+          at: new Date().toISOString(),
+          mode: "scheduled",
+          error: String(e?.message ?? e)
+        };
+        await emitLog({
+          tenantId: "system",
+          repId: "system",
+          session_id: "retention",
+          service: "server",
+          eventType: "retention_prune_error",
+          data: { message: String(e?.message ?? e) }
+        });
+      }
+    };
+
+    runPrune().catch(() => undefined);
+    setInterval(() => {
+      runPrune().catch(() => undefined);
+    }, CONFIG.retentionPruneIntervalMs);
+  }
 });

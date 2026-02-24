@@ -43,7 +43,7 @@ export function OverlayPreview(props: {
           {state.settings.controls.guidanceMuted ? "Unmute" : "Mute"}
         </button>
         {state.settings.status?.failureCode ? (
-          <span style={{ color: "crimson" }}>Failure: {state.settings.status.failureCode}</span>
+          <span style={{ color: "#ff7e9f" }}>Failure: {state.settings.status.failureCode}</span>
         ) : null}
       </div>
 
@@ -83,7 +83,7 @@ export function OverlayPreview(props: {
           </div>
         </div>
       ) : (
-        <div style={{ color: "#666" }}>No guidance items (yet).</div>
+        <div style={{ color: "#9db2ce" }}>No guidance items (yet).</div>
       )}
     </div>
   );

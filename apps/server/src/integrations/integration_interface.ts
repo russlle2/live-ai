@@ -1,4 +1,11 @@
-export type IntegrationName = "salesforce" | "hubspot";
+export type IntegrationName =
+  | "salesforce"
+  | "hubspot"
+  | "zoom"
+  | "google_meet"
+  | "google_workspace"
+  | "bluetooth_bridge"
+  | "server_webhook";
 
 export type IntegrationWriteRequest = {
   tenantId: string;
