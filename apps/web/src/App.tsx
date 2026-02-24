@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OverlayMessageV1, OverlayStateV1, WsServerMessageV1 } from "@overlay-assistant/shared";
 import { sanitizePatch_v1 } from "@overlay-assistant/shared";
 import { OverlayPreview } from "./components/OverlayPreview";
@@ -33,6 +33,7 @@ export function App() {
   const [sessionId, setSessionId] = useState(() => newId("sess"));
   const [wsStatus, setWsStatus] = useState<"disconnected" | "connecting" | "ready">("disconnected");
   const [ws, setWs] = useState<WebSocket | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const [transcript, setTranscript] = useState<string[]>([]);
   const [overlayState, setOverlayState] = useState<OverlayStateV1>(DEFAULT_STATE);
   const [inputText, setInputText] = useState("");
@@ -44,6 +45,7 @@ export function App() {
   const [audioRunning, setAudioRunning] = useState(false);
   const [guidanceDashboard, setGuidanceDashboard] = useState<GuidanceDashboard | null>(null);
   const [guidanceHistory, setGuidanceHistory] = useState<GuidanceDashboard[]>([]);
+  const [simpleMode, setSimpleMode] = useState(false);
   const [speakerTurn, setSpeakerTurn] = useState<{
     speaker: "rep" | "customer" | "unknown";
     text: string;
@@ -114,10 +116,11 @@ export function App() {
     }
   };
 
-  const connect = () => {
-    if (ws && ws.readyState === WebSocket.OPEN) return; // already connected
+  const connect = useCallback(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return; // already connected
     setWsStatus("connecting");
     const next = new WebSocket(WS_URL);
+    wsRef.current = next;
 
     next.onopen = () => {
       next.send(JSON.stringify({ type: "start", session_id: sessionId, tenantId, repId, apiKey: API_KEY, deviceType: "desktop", clientName: "desktop-overlay", role: "host" }));
@@ -182,10 +185,11 @@ export function App() {
     next.onclose = () => {
       setWsStatus("disconnected");
       setWs(null);
+      wsRef.current = null;
     };
 
     setWs(next);
-  };
+  }, [sessionId, tenantId, repId]);
 
   const sendControl = (action: string, value?: string | boolean | number | null) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -196,6 +200,14 @@ export function App() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({ type: "learning_signal", source: "desktop", outcome, session_id: sessionId, at: new Date().toISOString() }));
   };
+
+  // Hands-free: auto-connect WS when audio starts
+  const handleAudioStateChange = useCallback((running: boolean) => {
+    setAudioRunning(running);
+    if (running && (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN)) {
+      connect();
+    }
+  }, [connect]);
 
   const sendTranscript = async () => {
     const text = inputText.trim();
@@ -236,13 +248,190 @@ export function App() {
       ws.close();
     }
     setWs(null);
+    wsRef.current = null;
     setWsStatus("disconnected");
   };
 
+// Derive the primary "say this" text for Simple Mode
+  const primaryLine = guidanceDashboard?.primary?.text ?? null;
+  const primaryTitle = guidanceDashboard?.primary?.title ?? null;
+  const currentStage = guidanceDashboard?.stage ?? "waiting";
+  const customerSaid = guidanceDashboard?.speakerData?.lastCustomerText ?? null;
+
   return (
     <div className="oa-web-shell">
-      <h2 className="oa-title">Overlay Assistant — Live AI Sales Command Center</h2>
 
+      {/* ═══ SIMPLE MODE TOGGLE — always visible at top ═══ */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+        <button
+          onClick={() => setSimpleMode(!simpleMode)}
+          style={{
+            flex: "0 0 auto",
+            padding: "14px 32px",
+            fontSize: 18,
+            fontWeight: 800,
+            borderRadius: 12,
+            border: "2px solid",
+            borderColor: simpleMode ? "#4ade80" : "#60a5fa",
+            background: simpleMode ? "rgba(74,222,128,0.15)" : "rgba(96,165,250,0.1)",
+            color: simpleMode ? "#4ade80" : "#60a5fa",
+            cursor: "pointer",
+            transition: "all 0.3s ease",
+            letterSpacing: "0.5px",
+          }}
+        >
+          {simpleMode ? "EXIT SIMPLE MODE" : "SIMPLE MODE"}
+        </button>
+        {!simpleMode && <h2 className="oa-title" style={{ margin: 0 }}>Overlay Assistant — Live AI Sales Command Center</h2>}
+        {simpleMode && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginLeft: "auto" }}>
+            <span style={{
+              fontSize: 13,
+              color: wsStatus === "ready" ? "#4ade80" : audioRunning ? "#fbbf24" : "#ff9ca8",
+              fontWeight: 700,
+            }}>
+              {wsStatus === "ready" && audioRunning ? "● LIVE" : wsStatus === "ready" ? "● CONNECTED" : audioRunning ? "● AUDIO ONLY" : "● IDLE"}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* ═══════════════════════════════════════════════════════════════════════ */}
+      {/* ═══ SIMPLE MODE — full-screen teleprompter view ═══════════════════ */}
+      {/* ═══════════════════════════════════════════════════════════════════════ */}
+      {simpleMode ? (
+        <div style={{
+          display: "flex", flexDirection: "column",
+          minHeight: "calc(100vh - 100px)",
+          gap: 12,
+        }}>
+          {/* Minimal audio + session controls */}
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <LiveAudioPanel
+              tenantId={tenantId}
+              repId={repId}
+              sessionId={sessionId}
+              timelinePush={latestTimelineEvent}
+              onAudioStateChange={handleAudioStateChange}
+              speakerTurn={speakerTurn}
+              compact
+            />
+            {wsStatus === "ready" ? (
+              <button
+                onClick={() => disconnect()}
+                style={{
+                  padding: "10px 20px", fontSize: 14, fontWeight: 700,
+                  borderRadius: 8, border: "1px solid #ff6b7f", background: "rgba(255,107,127,0.1)",
+                  color: "#ff6b7f", cursor: "pointer"
+                }}
+              >
+                Stop Session
+              </button>
+            ) : (
+              <button
+                onClick={() => connect()}
+                style={{
+                  padding: "10px 20px", fontSize: 14, fontWeight: 700,
+                  borderRadius: 8, border: "1px solid #4ade80", background: "rgba(74,222,128,0.1)",
+                  color: "#4ade80", cursor: "pointer"
+                }}
+              >
+                Start Session
+              </button>
+            )}
+          </div>
+
+          {/* What the customer just said (small) */}
+          {customerSaid && (
+            <div style={{
+              padding: "10px 16px", borderRadius: 10,
+              background: "rgba(251,191,36,0.06)", borderLeft: "4px solid #fbbf24",
+              fontSize: 14, color: "#fbbf24", lineHeight: 1.4,
+            }}>
+              <span style={{ fontWeight: 700, fontSize: 12, textTransform: "uppercase", letterSpacing: 1 }}>CUSTOMER SAID: </span>
+              <span style={{ color: "#cbd5e1" }}>"{customerSaid.length > 200 ? customerSaid.slice(0, 200) + "..." : customerSaid}"</span>
+            </div>
+          )}
+
+          {/* ═══ THE MAIN EVENT: What to say ═══ */}
+          <div style={{
+            flex: 1,
+            display: "flex", flexDirection: "column",
+            justifyContent: "center", alignItems: "center",
+            padding: "40px 30px",
+            borderRadius: 16,
+            background: primaryLine
+              ? "linear-gradient(135deg, rgba(74,222,128,0.06) 0%, rgba(96,165,250,0.06) 100%)"
+              : "rgba(30,41,59,0.5)",
+            border: primaryLine ? "2px solid rgba(74,222,128,0.3)" : "1px solid #2b3a51",
+            transition: "all 0.5s ease",
+            minHeight: 300,
+          }}>
+            {primaryLine ? (
+              <>
+                <div style={{
+                  fontSize: 14, fontWeight: 700, color: "#4ade80",
+                  textTransform: "uppercase", letterSpacing: 2, marginBottom: 16,
+                }}>
+                  {primaryTitle || "SAY THIS NOW"}
+                </div>
+                <div style={{
+                  fontSize: 32, fontWeight: 600, lineHeight: 1.4,
+                  color: "#f1f5f9", textAlign: "center",
+                  maxWidth: 850,
+                  transition: "all 0.3s ease",
+                }}>
+                  {primaryLine}
+                </div>
+                {guidanceDashboard?.primary?.confidence != null && (
+                  <div style={{
+                    marginTop: 20, fontSize: 12, color: "#9db2ce",
+                    textTransform: "uppercase", letterSpacing: 1
+                  }}>
+                    {currentStage} • confidence {Math.round(guidanceDashboard.primary.confidence * 100)}%
+                  </div>
+                )}
+              </>
+            ) : (
+              <div style={{ textAlign: "center" }}>
+                <div style={{ fontSize: 48, marginBottom: 16 }}>🎯</div>
+                <div style={{ fontSize: 22, color: "#9db2ce", fontWeight: 500 }}>
+                  {audioRunning && wsStatus === "ready"
+                    ? "Listening... start speaking and guidance will appear here automatically."
+                    : "Start audio to begin — the AI will tell you exactly what to say."}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Alternatives (compact, below) */}
+          {guidanceDashboard?.alternatives && guidanceDashboard.alternatives.length > 0 && (
+            <div style={{
+              display: "flex", gap: 8, flexWrap: "wrap",
+              padding: "8px 0"
+            }}>
+              <span style={{ fontSize: 11, color: "#9db2ce", fontWeight: 700, alignSelf: "center" }}>OR:</span>
+              {guidanceDashboard.alternatives.slice(0, 3).map((alt, i) => (
+                <div key={i} style={{
+                  padding: "8px 14px", borderRadius: 8,
+                  background: "rgba(96,165,250,0.08)", border: "1px solid #2b3a51",
+                  fontSize: 13, color: "#cbd5e1", cursor: "pointer", lineHeight: 1.3,
+                  maxWidth: 350
+                }}
+                  onClick={() => navigator.clipboard?.writeText(alt.text).catch(() => undefined)}
+                  title="Click to copy"
+                >
+                  <b style={{ color: "#60a5fa" }}>{alt.strategy}: </b>{alt.text.length > 100 ? alt.text.slice(0, 100) + "..." : alt.text}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+      /* ═══════════════════════════════════════════════════════════════════════ */
+      /* ═══ FULL MODE — original 3-column command center ═══════════════════ */
+      /* ═══════════════════════════════════════════════════════════════════════ */
+      <>
       {/* ─── Persistent status bar (always visible) ─── */}
       <div className="oa-status-bar">
         <span>
@@ -322,7 +511,7 @@ export function App() {
                 repId={repId}
                 sessionId={sessionId}
                 timelinePush={latestTimelineEvent}
-                onAudioStateChange={setAudioRunning}
+                onAudioStateChange={handleAudioStateChange}
                 speakerTurn={speakerTurn}
               />
 
@@ -419,6 +608,8 @@ export function App() {
             </div>
           </div>
         </>
+      )}
+      </>
       )}
     </div>
   );

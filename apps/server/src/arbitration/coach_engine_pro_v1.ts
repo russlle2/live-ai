@@ -163,15 +163,15 @@ export async function buildCoachOverlayPatchV1(args: {
     if (!rationale) rationale = "objection_stacking";
   }
 
-  // Stage momentum nudges (push the deal forward without guessing product details)
+  // Stage momentum nudges (exact scripts, not coaching advice)
   if (stageInf.stage === "evaluation" && momentum.level !== "high" && !/\b(next step|schedule|book)\b/i.test(line)) {
-    line = `${line} If helpful, we can do a 10‑minute requirements map and leave you with a yes/no checklist — want to do that now or book it?`;
+    line = `${line} Want to do a quick 10-minute requirements map right now, or should we book it?`;
   }
   if (stageInf.stage === "decision" && !/\bwho\b/i.test(line)) {
-    line = `${line} Quick one: who besides you needs to say “yes” for this to move forward?`;
+    line = `${line} Besides you, who else needs to say yes for this to move forward?`;
   }
   if (stageInf.stage === "closing" && !/\bnext step\b/i.test(line)) {
-    line = `${line} What’s the clean next step to keep this moving today?`;
+    line = `${line} What is the cleanest next step to keep this moving today?`;
   }
 
   // 4) Tone adaptation (rewrite style, not facts)
@@ -235,7 +235,7 @@ export async function buildCoachOverlayPatchV1(args: {
 
   const item: GuidanceItemV1 = {
     id: randId("g"),
-    title: objections.top[0]?.key ? `Handle: ${objectionLabelV1(objections.top[0].key)}` : "Next best line",
+    title: objections.top[0]?.key ? `SAY THIS (${objectionLabelV1(objections.top[0].key)})` : "SAY THIS NOW",
     category: `${meta.stage}/${baseMeta?.moment ?? "moment"}/${baseMeta?.microGoal ?? "micro_goal"}`,
     text: line,
     confidence: conf,
@@ -389,9 +389,9 @@ function buildRepFeedback(
 
   const item: GuidanceItemV1 = {
     id: randId("rf"),
-    title: `${assessmentEmoji} Rep feedback: ${category.replace(/_/g, " ")}`,
+    title: `${assessmentEmoji} ${assessment === "warning" ? "CAREFUL" : "KEEP GOING"}`,
     category: `rep_feedback/${category}`,
-    text: `${feedback} TIP: ${tip}`,
+    text: `${feedback} → ${tip}`,
     confidence: assessment === "strong" ? 0.85 : assessment === "good" ? 0.7 : assessment === "warning" ? 0.9 : 0.6,
     confidenceBand: assessment === "warning" ? "high" : assessment === "strong" ? "high" : "medium",
     createdAt: new Date().toISOString(),

@@ -51,6 +51,8 @@ export function LiveAudioPanel(props: {
     talkRatio: { rep: number; customer: number };
     coachingContext: { customerIntent?: string; repAssessment?: string };
   } | null;
+  /** When true, show only a compact start/stop bar (for Simple Mode) */
+  compact?: boolean;
 }) {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
@@ -78,6 +80,8 @@ export function LiveAudioPanel(props: {
   const timerRef = useRef<number | null>(null);
   const speechRef = useRef<any>(null);
   const runningRef = useRef(false);
+  const partialTextRef = useRef("");
+  const restartCountRef = useRef(0);
   const seenEventIdsRef = useRef<Set<number>>(new Set());
   const [timelineCursor, setTimelineCursor] = useState(0);
 
@@ -279,67 +283,92 @@ export function LiveAudioPanel(props: {
       const rms = Math.sqrt(sum / arr.length);
       const normalized = Math.max(0, Math.min(1, rms * 4.8));
       setEnergy(normalized);
-      sendFrame(normalized, partialText || undefined, undefined).catch(() => undefined);
+      // Use ref to avoid stale closure
+      const pt = partialTextRef.current || undefined;
+      sendFrame(normalized, pt, undefined).catch(() => undefined);
     }, 500);
+
+    // CRITICAL: set runningRef BEFORE anything that could trigger onend
+    runningRef.current = true;
+    setRunning(true);
+    restartCountRef.current = 0;
 
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (SpeechRecognition) {
-      const rec = new SpeechRecognition();
-      rec.lang = "en-US";
-      rec.interimResults = true;
-      rec.continuous = true;
-      rec.maxAlternatives = 1;
-      rec.onresult = (event: any) => {
-        let interim = "";
-        let finalOut = "";
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = String(event.results[i][0]?.transcript || "").trim();
-          if (!transcript) continue;
-          if (event.results[i].isFinal) finalOut += `${transcript} `;
-          else interim += `${transcript} `;
-        }
-        const p = interim.trim();
-        const f = finalOut.trim();
-        setPartialText(p);
-        if (f) {
-          setFinalText(f);
-          sendFrame(energy, p || undefined, f).catch(() => undefined);
-        }
-      };
-      rec.onerror = (ev: any) => {
-        const code = ev?.error || "unknown";
-        // These errors are recoverable — auto-restart
-        if (code === "no-speech" || code === "aborted" || code === "network") {
-          if (runningRef.current) {
-            try { rec.stop(); } catch { /* ignore */ }
-            setTimeout(() => {
-              if (runningRef.current) {
-                try { rec.start(); } catch { /* ignore */ }
-              }
-            }, 300);
+      const startRecognition = () => {
+        const rec = new SpeechRecognition();
+        rec.lang = "en-US";
+        rec.interimResults = true;
+        rec.continuous = true;
+        rec.maxAlternatives = 1;
+        rec.onresult = (event: any) => {
+          restartCountRef.current = 0; // successful result resets counter
+          let interim = "";
+          let finalOut = "";
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const transcript = String(event.results[i][0]?.transcript || "").trim();
+            if (!transcript) continue;
+            if (event.results[i].isFinal) finalOut += `${transcript} `;
+            else interim += `${transcript} `;
           }
-          return;
-        }
-        setError(`Speech recognition error (${code}). You can still use manual final lines.`);
-      };
-      // Auto-restart: Chrome often fires onend even with continuous=true
-      rec.onend = () => {
-        if (runningRef.current) {
+          const p = interim.trim();
+          const f = finalOut.trim();
+          setPartialText(p);
+          partialTextRef.current = p;
+          if (f) {
+            setFinalText(f);
+            sendFrame(0.5, p || undefined, f).catch(() => undefined);
+          }
+        };
+        rec.onerror = (ev: any) => {
+          const code = ev?.error || "unknown";
+          // These errors are recoverable — let onend handle restart
+          if (code === "no-speech" || code === "aborted" || code === "network" || code === "audio-capture") {
+            return; // onend will fire and handle restart
+          }
+          setError(`Speech recognition error (${code}). You can still use manual final lines.`);
+        };
+        // Auto-restart: Chrome often fires onend even with continuous=true
+        rec.onend = () => {
+          if (!runningRef.current) return;
+          restartCountRef.current++;
+          // Back off: 200ms, 500ms, 1s, 2s, cap at 3s
+          const delay = Math.min(3000, 200 * Math.pow(1.5, Math.min(restartCountRef.current, 8)));
           setTimeout(() => {
-            if (runningRef.current && speechRef.current) {
-              try { speechRef.current.start(); } catch { /* ignore */ }
+            if (!runningRef.current) return;
+            try {
+              // Create a fresh recognition instance to avoid stale state
+              const fresh = startRecognition();
+              speechRef.current = fresh;
+            } catch {
+              // Last resort: try again in 1s
+              setTimeout(() => {
+                if (runningRef.current) {
+                  try {
+                    const retry = startRecognition();
+                    speechRef.current = retry;
+                  } catch { /* give up */ }
+                }
+              }, 1000);
             }
-          }, 200);
+          }, delay);
+        };
+        try {
+          rec.start();
+        } catch {
+          // If start fails immediately, retry once
+          setTimeout(() => {
+            try { rec.start(); } catch { /* ignore */ }
+          }, 500);
         }
+        return rec;
       };
-      rec.start();
-      speechRef.current = rec;
+      const initialRec = startRecognition();
+      speechRef.current = initialRec;
     } else {
       setError("Browser speech recognition unavailable; using VAD + manual final lines.");
     }
 
-    setRunning(true);
-    runningRef.current = true;
     props.onAudioStateChange?.(true);
   };
 
@@ -399,6 +428,59 @@ export function LiveAudioPanel(props: {
     });
   }, [props.speakerTurn]);
 
+  // ─── Compact Mode (Simple Mode in parent) ─────────────────────────────────
+  if (props.compact) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        {!running ? (
+          <button
+            onClick={() => start()}
+            style={{
+              padding: "10px 24px", fontSize: 16, fontWeight: 800,
+              borderRadius: 10, border: "2px solid #4ade80",
+              background: "rgba(74,222,128,0.12)", color: "#4ade80",
+              cursor: "pointer", transition: "all 0.2s"
+            }}
+          >
+            Start Audio
+          </button>
+        ) : (
+          <button
+            onClick={() => stop()}
+            style={{
+              padding: "10px 24px", fontSize: 16, fontWeight: 800,
+              borderRadius: 10, border: "2px solid #ff6b7f",
+              background: "rgba(255,107,127,0.12)", color: "#ff6b7f",
+              cursor: "pointer", transition: "all 0.2s"
+            }}
+          >
+            Stop Audio
+          </button>
+        )}
+        {running && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+            <div style={{
+              width: 10, height: 10, borderRadius: "50%",
+              background: energy > 0.05 ? "#4ade80" : "#fbbf24",
+              boxShadow: energy > 0.05 ? "0 0 8px #4ade80" : "none",
+              animation: energy > 0.05 ? "pulse 1.5s infinite" : "none",
+            }} />
+            <span style={{ color: "#9db2ce" }}>
+              {energy > 0.05 ? "Hearing speech..." : "Listening..."}
+            </span>
+            {activeSpeaker !== "unknown" && (
+              <span style={{ fontWeight: 700, color: SPEAKER_COLORS[activeSpeaker] }}>
+                {SPEAKER_LABELS[activeSpeaker]}
+              </span>
+            )}
+          </div>
+        )}
+        {error && <span style={{ color: "#ff9ca8", fontSize: 12 }}>{error}</span>}
+      </div>
+    );
+  }
+
+  // ─── Full Mode ─────────────────────────────────────────────────────────────
   return (
     <div className="oa-card">
       <h3 style={{ marginTop: 0 }}>Live Audio (Bluetooth-first) + Speaker Detection</h3>
