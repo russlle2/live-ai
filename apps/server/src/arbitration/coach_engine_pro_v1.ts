@@ -113,10 +113,14 @@ export async function buildCoachOverlayPatchV1(args: {
   const now = Date.now();
   const speaker = args.speaker ?? "unknown";
 
-  // ── Rep-specific coaching: evaluate what the rep just said ──────────
-  // When the rep speaks, we don't suggest "say this" — instead we evaluate their performance
+  // ── Rep spoke: brief assessment + ALWAYS generate next line to say ──────
+  let repAssessmentNote: string | undefined;
   if (speaker === "rep") {
-    return buildRepFeedback(text, tNorm, memory, now);
+    const fb = buildRepFeedback(text, tNorm, memory, now);
+    const fbMeta = fb.meta as any;
+    const emoji = fbMeta?.assessment === "strong" ? "💪" : fbMeta?.assessment === "warning" ? "⚠️" : "👍";
+    repAssessmentNote = `${emoji} ${(fb.patch?.text ?? "").replace(/^[💪👍⚠️💡]\s*/, "").slice(0, 100)}`;
+    // DON'T return — fall through to generate next script for the rep to say
   }
 
   // 1) Run your existing engine (keeps product packs + your current intent logic)
@@ -235,7 +239,9 @@ export async function buildCoachOverlayPatchV1(args: {
 
   const item: GuidanceItemV1 = {
     id: randId("g"),
-    title: objections.top[0]?.key ? `SAY THIS (${objectionLabelV1(objections.top[0].key)})` : "SAY THIS NOW",
+    title: repAssessmentNote
+      ? (objections.top[0]?.key ? `SAY THIS (${objectionLabelV1(objections.top[0].key)})` : "SAY THIS NEXT")
+      : (objections.top[0]?.key ? `SAY THIS (${objectionLabelV1(objections.top[0].key)})` : "SAY THIS NOW"),
     category: `${meta.stage}/${baseMeta?.moment ?? "moment"}/${baseMeta?.microGoal ?? "micro_goal"}`,
     text: line,
     confidence: conf,
@@ -246,6 +252,7 @@ export async function buildCoachOverlayPatchV1(args: {
       ifPushed: ifPushed || undefined,
       rationale: rationale || "pro_layer",
       silenceCue: silenceCue || undefined,
+      repAssessmentNote: repAssessmentNote || undefined,
       meta: { ...(baseMeta ?? {}), ...meta }
     } as any
   };

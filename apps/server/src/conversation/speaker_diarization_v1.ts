@@ -55,6 +55,10 @@ export interface DiarizationState {
   classifiedTurns: number;
   /** Consecutive same-speaker count (for detecting monologues vs dialogue) */
   consecutiveSame: number;
+  /** Maps audioSourceId → speaker role (learned from first classified turn per source) */
+  audioSourceMap: Map<string, SpeakerRole>;
+  /** The audioSourceId identified as the primary/host device (rep) */
+  primaryAudioSourceId?: string;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -107,6 +111,7 @@ export function createDiarizationState(): DiarizationState {
     repVocabulary: new Set(),
     classifiedTurns: 0,
     consecutiveSame: 0,
+    audioSourceMap: new Map(),
   };
 }
 
@@ -167,6 +172,8 @@ export interface ClassifyInput {
   deviceType?: string;
   /** Device role (host/controller/viewer) */
   deviceRole?: string;
+  /** Unique ID for the audio input device (microphone). Different IDs = different speakers. */
+  audioSourceId?: string;
   /** Timestamp epoch ms */
   timestamp?: number;
 }
@@ -200,7 +207,54 @@ export function classifySpeaker(state: DiarizationState, input: ClassifyInput): 
       weight: 1.0,
     });
   }
+  // ─── Signal 1.5: Audio source ID (weight: 0.9) ──────────────────
+  // If we've seen this audioSourceId before, we know who it is.
+  // If it's a NEW audioSourceId, it's a different speaker.
+  if (input.audioSourceId) {
+    if (!state.audioSourceMap) state.audioSourceMap = new Map();
 
+    const knownRole = state.audioSourceMap.get(input.audioSourceId);
+    if (knownRole) {
+      // We've seen this source before — high confidence
+      signals.push({
+        type: "device_attribution",
+        value: knownRole,
+        weight: 0.9,
+        deviceType: input.deviceType ?? "audio_source",
+      });
+    } else if (state.audioSourceMap.size > 0) {
+      // New source ID, and we already have at least one mapped
+      // → this is likely the OTHER speaker
+      const existingRoles = new Set(state.audioSourceMap.values());
+      if (existingRoles.has("rep") && !existingRoles.has("customer")) {
+        signals.push({
+          type: "device_attribution",
+          value: "customer",
+          weight: 0.85,
+          deviceType: input.deviceType ?? "audio_source_new",
+        });
+      } else if (existingRoles.has("customer") && !existingRoles.has("rep")) {
+        signals.push({
+          type: "device_attribution",
+          value: "rep",
+          weight: 0.85,
+          deviceType: input.deviceType ?? "audio_source_new",
+        });
+      }
+    } else {
+      // First audio source — if device role is host, this is the rep
+      if (input.deviceRole === "host") {
+        state.primaryAudioSourceId = input.audioSourceId;
+        state.audioSourceMap.set(input.audioSourceId, "rep");
+        signals.push({
+          type: "device_attribution",
+          value: "rep",
+          weight: 0.8,
+          deviceType: input.deviceType ?? "primary_source",
+        });
+      }
+    }
+  }
   // ─── Signal 2: Device attribution (weight: 0.7) ─────────────────────
   if (input.deviceRole || input.deviceType) {
     const role = input.deviceRole;
@@ -368,6 +422,14 @@ export function classifySpeaker(state: DiarizationState, input: ClassifyInput): 
     // Adapt threshold based on classification success
     if (confidence >= 0.7) {
       state.adaptiveThreshold = Math.max(0.35, state.adaptiveThreshold * 0.98);
+    }
+
+    // Learn audioSourceId → speaker mapping once we're confident
+    if (input.audioSourceId && confidence >= 0.6) {
+      if (!state.audioSourceMap) state.audioSourceMap = new Map();
+      if (!state.audioSourceMap.has(input.audioSourceId)) {
+        state.audioSourceMap.set(input.audioSourceId, speaker);
+      }
     }
   }
 

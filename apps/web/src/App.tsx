@@ -257,11 +257,14 @@ export function App() {
   const primaryTitle = guidanceDashboard?.primary?.title ?? null;
   const currentStage = guidanceDashboard?.stage ?? "waiting";
   const customerSaid = guidanceDashboard?.speakerData?.lastCustomerText ?? null;
+  // Extract follow-up lines from the overlay state guidance items
+  const primaryItem = overlayState?.guidance?.items?.[0] as any;
+  const followUpLine = primaryItem?.explanation?.followUp ?? null;
+  const ifPushedLine = primaryItem?.explanation?.ifPushed ?? null;
+  const repAssessmentNote = primaryItem?.explanation?.repAssessmentNote ?? null;
 
   return (
-    <div className="oa-web-shell">
-
-      {/* ═══ SIMPLE MODE TOGGLE — always visible at top ═══ */}
+    <div className="oa-web-shell" style={{ padding: 18, fontFamily: "'Inter', system-ui, sans-serif" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
         <button
           onClick={() => setSimpleMode(!simpleMode)}
@@ -344,61 +347,100 @@ export function App() {
           {/* What the customer just said (small) */}
           {customerSaid && (
             <div style={{
-              padding: "10px 16px", borderRadius: 10,
+              padding: "12px 20px", borderRadius: 12,
               background: "rgba(251,191,36,0.06)", borderLeft: "4px solid #fbbf24",
-              fontSize: 14, color: "#fbbf24", lineHeight: 1.4,
+              fontSize: 15, color: "#fbbf24", lineHeight: 1.4,
             }}>
-              <span style={{ fontWeight: 700, fontSize: 12, textTransform: "uppercase", letterSpacing: 1 }}>CUSTOMER SAID: </span>
-              <span style={{ color: "#cbd5e1" }}>"{customerSaid.length > 200 ? customerSaid.slice(0, 200) + "..." : customerSaid}"</span>
+              <span style={{ fontWeight: 700, fontSize: 13, textTransform: "uppercase", letterSpacing: 1 }}>THEY SAID: </span>
+              <span style={{ color: "#e2e8f0" }}>"{customerSaid.length > 250 ? customerSaid.slice(0, 250) + "..." : customerSaid}"</span>
             </div>
           )}
 
-          {/* ═══ THE MAIN EVENT: What to say ═══ */}
+          {/* Rep assessment note (when rep was speaking) */}
+          {repAssessmentNote && (
+            <div style={{
+              padding: "8px 16px", borderRadius: 8,
+              background: "rgba(96,165,250,0.06)", borderLeft: "3px solid #60a5fa",
+              fontSize: 13, color: "#93c5fd", lineHeight: 1.3,
+            }}>
+              {repAssessmentNote}
+            </div>
+          )}
+
+          {/* ═══ THE MAIN EVENT: What to say — takes up maximum space ═══ */}
           <div style={{
             flex: 1,
             display: "flex", flexDirection: "column",
             justifyContent: "center", alignItems: "center",
-            padding: "40px 30px",
-            borderRadius: 16,
+            padding: "50px 40px",
+            borderRadius: 20,
             background: primaryLine
-              ? "linear-gradient(135deg, rgba(74,222,128,0.06) 0%, rgba(96,165,250,0.06) 100%)"
+              ? "linear-gradient(135deg, rgba(74,222,128,0.08) 0%, rgba(96,165,250,0.05) 100%)"
               : "rgba(30,41,59,0.5)",
             border: primaryLine ? "2px solid rgba(74,222,128,0.3)" : "1px solid #2b3a51",
             transition: "all 0.5s ease",
-            minHeight: 300,
+            minHeight: "50vh",
           }}>
             {primaryLine ? (
               <>
                 <div style={{
-                  fontSize: 14, fontWeight: 700, color: "#4ade80",
-                  textTransform: "uppercase", letterSpacing: 2, marginBottom: 16,
+                  fontSize: 16, fontWeight: 800, color: "#4ade80",
+                  textTransform: "uppercase", letterSpacing: 3, marginBottom: 24,
                 }}>
                   {primaryTitle || "SAY THIS NOW"}
                 </div>
                 <div style={{
-                  fontSize: 32, fontWeight: 600, lineHeight: 1.4,
-                  color: "#f1f5f9", textAlign: "center",
-                  maxWidth: 850,
+                  fontSize: "clamp(24px, 4vw, 42px)", fontWeight: 600, lineHeight: 1.45,
+                  color: "#f8fafc", textAlign: "center",
+                  maxWidth: 950,
                   transition: "all 0.3s ease",
                 }}>
                   {primaryLine}
                 </div>
-                {guidanceDashboard?.primary?.confidence != null && (
+
+                {/* Follow-up and if-pushed lines */}
+                {(followUpLine || ifPushedLine) && (
                   <div style={{
-                    marginTop: 20, fontSize: 12, color: "#9db2ce",
-                    textTransform: "uppercase", letterSpacing: 1
+                    marginTop: 30, width: "100%", maxWidth: 850,
+                    display: "flex", flexDirection: "column", gap: 10,
                   }}>
-                    {currentStage} • confidence {Math.round(guidanceDashboard.primary.confidence * 100)}%
+                    {followUpLine && (
+                      <div style={{
+                        padding: "12px 18px", borderRadius: 10,
+                        background: "rgba(96,165,250,0.06)", borderLeft: "3px solid #60a5fa",
+                        fontSize: "clamp(14px, 1.8vw, 18px)", color: "#cbd5e1", lineHeight: 1.4,
+                      }}>
+                        <span style={{ fontWeight: 700, color: "#60a5fa", fontSize: 11, textTransform: "uppercase", letterSpacing: 1 }}>FOLLOW UP: </span>
+                        {followUpLine}
+                      </div>
+                    )}
+                    {ifPushedLine && (
+                      <div style={{
+                        padding: "12px 18px", borderRadius: 10,
+                        background: "rgba(251,191,36,0.04)", borderLeft: "3px solid #fbbf24",
+                        fontSize: "clamp(13px, 1.6vw, 16px)", color: "#9db2ce", lineHeight: 1.4,
+                      }}>
+                        <span style={{ fontWeight: 700, color: "#fbbf24", fontSize: 11, textTransform: "uppercase", letterSpacing: 1 }}>IF THEY PUSH BACK: </span>
+                        {ifPushedLine}
+                      </div>
+                    )}
                   </div>
                 )}
+
+                <div style={{
+                    marginTop: 24, fontSize: 12, color: "#64748b",
+                    textTransform: "uppercase", letterSpacing: 1
+                  }}>
+                    {currentStage} stage
+                </div>
               </>
             ) : (
               <div style={{ textAlign: "center" }}>
-                <div style={{ fontSize: 48, marginBottom: 16 }}>🎯</div>
-                <div style={{ fontSize: 22, color: "#9db2ce", fontWeight: 500 }}>
+                <div style={{ fontSize: 64, marginBottom: 20 }}>🎯</div>
+                <div style={{ fontSize: 26, color: "#9db2ce", fontWeight: 500, maxWidth: 600, lineHeight: 1.4 }}>
                   {audioRunning && wsStatus === "ready"
-                    ? "Listening... start speaking and guidance will appear here automatically."
-                    : "Start audio to begin — the AI will tell you exactly what to say."}
+                    ? "Listening... Your opening line will appear here any moment."
+                    : "Press \"Start Audio\" to begin — the AI will tell you exactly what to say from hello to goodbye."}
                 </div>
               </div>
             )}

@@ -351,6 +351,7 @@ app.post("/api/live/audio_frame", async (req, res) => {
       explicitSpeaker: (body.speaker as any) ?? undefined,
       deviceType: body.deviceType ?? undefined,
       deviceRole: body.deviceRole ?? undefined,
+      audioSourceId: body.audioSourceId ?? undefined,
       timestamp: Date.now(),
     });
 
@@ -545,7 +546,9 @@ const LiveAudioFrameInput = z.object({
   /** Device role for diarization attribution */
   deviceRole: z.enum(["host", "controller", "viewer"]).optional(),
   /** Device type for diarization */
-  deviceType: z.string().max(30).optional()
+  deviceType: z.string().max(30).optional(),
+  /** Audio source device ID — distinct IDs mean distinct audio streams/speakers */
+  audioSourceId: z.string().max(200).optional()
 });
 
 const ConversationIntelInput = z.object({
@@ -702,6 +705,87 @@ function broadcast(sessionId: string, msg: WsServerMessageV1) {
   for (const ws of set) {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
   }
+}
+
+/** Send an immediate "hello" opener guidance so the rep knows what to say from the very start */
+function sendOpenerGuidance(ctx: SessionCtx) {
+  const pCtx = ctx.productContext;
+  const productName = pCtx?.productName ?? "";
+
+  // Build a concrete opener script
+  let openerLine: string;
+  let openerFollowUp: string;
+  let openerTitle: string;
+
+  if (productName) {
+    openerLine = `Hi! Thanks for taking the time today. I am excited to show you what ${productName} can do for you. Before I dive in, what is the biggest challenge you are facing right now that made you want to look at this?`;
+    openerFollowUp = `If they already told you: "Great, sounds like [repeat their challenge]. Let me show you exactly how we solve that."`;
+    openerTitle = `SAY THIS — Opening (${productName})`;
+  } else {
+    openerLine = `Hi, thanks for your time today! Before I jump into anything, I would love to hear from you — what is the main thing you are hoping to solve? That way I can keep this relevant to what actually matters to you.`;
+    openerFollowUp = `If they share their challenge: "Perfect. Let me show you exactly how we handle that."`;
+    openerTitle = "SAY THIS — Opening";
+  }
+
+  const dashboard: GuidanceDashboardSnapshot = {
+    timestamp: new Date().toISOString(),
+    primary: {
+      text: openerLine,
+      title: openerTitle,
+      confidence: 0.95,
+      confidenceBand: "high",
+    },
+    alternatives: [
+      { text: `Hi! I know your time is valuable, so let me start with a quick question: what would make this the best use of the next 20 minutes for you?`, strategy: "Time-conscious opener" },
+      { text: `Hey, great to meet you! I have done a bit of research on your company ${pCtx?.targetAudience ? `and your ${pCtx.targetAudience} space` : ""} — but I would rather hear from you: what is top of mind for you right now?`, strategy: "Research-based opener" },
+    ],
+    stage: "discovery",
+    momentum: { level: "medium", score: 50 },
+    buyerSentiment: { tone: "neutral", engagement: "medium", urgency: "medium" },
+    objectionsDetected: [],
+    talkingPoints: pCtx?.valueProps?.slice(0, 3).map(v => `✦ ${v}`) ?? ["Introduce yourself", "Ask what they need", "Listen before pitching"],
+    riskAlerts: [],
+    dealScore: 30,
+    nextMoves: ["Deliver your opener", "Listen to their response", "Tailor your pitch to what they say"],
+    speakerData: {
+      lastSpeaker: "unknown",
+      talkRatio: { rep: 50, customer: 50 },
+      repTurns: 0,
+      customerTurns: 0,
+      lastCustomerText: "",
+      lastRepText: "",
+      coachingContext: {},
+    },
+  };
+
+  // Also send overlay patch
+  const patch = {
+    text: openerLine,
+    guidance: {
+      items: [{
+        id: `opener_${crypto.randomBytes(4).toString("hex")}`,
+        title: openerTitle,
+        category: "discovery/opener/engage",
+        text: openerLine,
+        confidence: 0.95,
+        confidenceBand: "high" as const,
+        createdAt: new Date().toISOString(),
+        explanation: { schema: "explanation_v1" as const, reasons: ["session_opener"], followUp: openerFollowUp, rationale: "session_opener" },
+      }],
+    },
+  };
+
+  const overlayMsg: OverlayMessageV1 = { type: "patch", patch };
+  broadcast(ctx.sessionId, { type: "overlay_message", session_id: ctx.sessionId, at: new Date().toISOString(), message: overlayMsg });
+  broadcast(ctx.sessionId, {
+    type: "guidance_dashboard",
+    session_id: ctx.sessionId,
+    at: new Date().toISOString(),
+    dashboard: dashboard as unknown as Record<string, unknown>,
+  });
+
+  if (!ctx.guidanceHistory) ctx.guidanceHistory = [];
+  ctx.guidanceHistory.push(dashboard);
 }
 
 function toLineHash(line: string): string {
@@ -1334,6 +1418,9 @@ wss.on("connection", (ws) => {
       ws.send(JSON.stringify({ type: "overlay_message", session_id: sessionId, at: new Date().toISOString(), message: settings } satisfies WsServerMessageV1));
 
       emitSessionState(sessionId);
+
+      // ── Send opener guidance immediately so the rep knows what to say from \"hello\" ──
+      sendOpenerGuidance(ctx);
 
       startSttMock(ctx);
       return;

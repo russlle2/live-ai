@@ -182,6 +182,8 @@ export function LiveAudioPanel(props: {
       speaker: explicitSpeaker,
       deviceRole: "host",
       deviceType: /Mobi|Android|iPhone/i.test(navigator.userAgent) ? "mobile" : "desktop",
+      // Send the audio input device ID so the server can distinguish audio streams
+      audioSourceId: selectedDeviceId || undefined,
     };
 
     const res = await fetch(`${API_BASE}/api/live/audio_frame`, {
