@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, Component, type ErrorInfo, type ReactNode } from "react";
 import type { OverlayMessageV1, OverlayStateV1, WsServerMessageV1 } from "@overlay-assistant/shared";
 import { sanitizePatch_v1 } from "@overlay-assistant/shared";
 import { OverlayPreview } from "./components/OverlayPreview";
@@ -12,6 +12,30 @@ import { API_BASE, WS_URL, API_KEY, apiHeaders } from "./lib/config";
 
 function newId(prefix: string) {
   return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
+}
+
+/* ═══ Error Boundary — catches render errors instead of blank screen ══════ */
+class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null; info: string }> {
+  state: { error: Error | null; info: string } = { error: null, info: "" };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("[App crash caught]", error, info);
+    this.setState({ info: info.componentStack ?? "" });
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 40, fontFamily: "monospace", color: "#ff6b7f", background: "#0e1525", minHeight: "100vh" }}>
+          <h2 style={{ color: "#ff6b7f" }}>Something went wrong</h2>
+          <pre style={{ whiteSpace: "pre-wrap", fontSize: 14, color: "#fbbf24" }}>{String(this.state.error)}</pre>
+          <pre style={{ whiteSpace: "pre-wrap", fontSize: 11, color: "#9db2ce", maxHeight: 300, overflow: "auto" }}>{this.state.info}</pre>
+          <button onClick={() => { this.setState({ error: null, info: "" }); }} style={{ marginTop: 20, padding: "12px 28px", fontSize: 16, fontWeight: 700, borderRadius: 10, border: "2px solid #4ade80", background: "rgba(74,222,128,0.12)", color: "#4ade80", cursor: "pointer" }}>Try Again</button>
+          <button onClick={() => window.location.reload()} style={{ marginTop: 20, marginLeft: 12, padding: "12px 28px", fontSize: 16, fontWeight: 700, borderRadius: 10, border: "2px solid #60a5fa", background: "rgba(96,165,250,0.12)", color: "#60a5fa", cursor: "pointer" }}>Reload Page</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 const DEFAULT_STATE: OverlayStateV1 = {
@@ -81,6 +105,7 @@ export function App() {
   };
 
   const handleOverlayMessage = async (m: OverlayMessageV1) => {
+    try {
     if (m.type === "settings") {
       setOverlayState((s: any) => ({ ...s, settings: (m as any).settings }));
       return;
@@ -88,7 +113,6 @@ export function App() {
 
     if (m.type === "patch") {
       const res = sanitizePatch_v1((m as any).patch);
-      // DEBUG: verify patch payload shape
       // eslint-disable-next-line no-console
       console.log("[patch payload]", (m as any).patch);
 
@@ -99,7 +123,7 @@ export function App() {
           sessionId,
           eventType: "patch_rejected",
           data: { reason: (res as any).reason, bytes: (res as any).bytes }
-        });
+        }).catch(() => undefined);
         return;
       }
 
@@ -109,10 +133,13 @@ export function App() {
         sessionId,
         eventType: "patch_received",
         data: { bytes: (res as any).bytes }
-      });
+      }).catch(() => undefined);
 
       applyPatch((res as any).patch);
       return;
+    }
+    } catch (err) {
+      console.error("[handleOverlayMessage] error", err);
     }
   };
 
@@ -127,6 +154,7 @@ export function App() {
     };
 
     next.onmessage = async (ev) => {
+      try {
       const msg = JSON.parse(ev.data) as WsServerMessageV1;
 
       if (msg.type === "ready") {
@@ -135,30 +163,32 @@ export function App() {
       }
 
       if (msg.type === "transcript_final") {
-        setTranscript((t) => [...t, msg.text]);
+        setTranscript((t) => [...t, String((msg as any).text ?? "")]);
         return;
       }
 
       if (msg.type === "overlay_message") {
         setLastOverlayMessage(msg.message as any);
         setLastPatchPayload((msg.message as any)?.type === "patch" ? (msg.message as any).patch : null);
-        handleOverlayMessage(msg.message as any);
+        try { handleOverlayMessage(msg.message as any); } catch (e) { console.error("[overlay_message handler]", e); }
         return;
       }
 
       if (msg.type === "session_state") {
-        setConnectedDevices(msg.state.connectedDevices as any);
-        setOverlayState((s) => ({ ...s, settings: { ...s.settings, controls: msg.state.controls } }));
+        const devs = (msg as any).state?.connectedDevices;
+        if (Array.isArray(devs)) setConnectedDevices(devs);
+        else if (devs && typeof devs === "object") setConnectedDevices(Object.entries(devs).map(([id, d]: [string, any]) => ({ id, type: d?.type ?? "unknown", name: d?.name })));
+        setOverlayState((s) => ({ ...s, settings: { ...s.settings, controls: (msg as any).state?.controls ?? s.settings.controls } }));
         return;
       }
 
       if (msg.type === "correction") {
-        setLastCorrection(msg.correction.note);
+        setLastCorrection((msg as any).correction?.note ?? "");
         return;
       }
 
       if (msg.type === "timeline_event") {
-        setLatestTimelineEvent({ at: msg.at, event: msg.event });
+        setLatestTimelineEvent({ at: msg.at, event: (msg as any).event });
       }
 
       if ((msg as any).type === "guidance_dashboard") {
@@ -179,6 +209,9 @@ export function App() {
           talkRatio: st.talkRatio ?? { rep: 50, customer: 50 },
           coachingContext: st.coachingContext ?? {},
         });
+      }
+      } catch (err) {
+        console.error("[ws.onmessage] unhandled error — UI stays live", err);
       }
     };
 
@@ -463,7 +496,7 @@ export function App() {
                   onClick={() => navigator.clipboard?.writeText(alt.text).catch(() => undefined)}
                   title="Click to copy"
                 >
-                  <b style={{ color: "#60a5fa" }}>{alt.strategy}: </b>{alt.text.length > 100 ? alt.text.slice(0, 100) + "..." : alt.text}
+                  <b style={{ color: "#60a5fa" }}>{alt?.strategy ?? ""}: </b>{(alt?.text ?? "").length > 100 ? (alt?.text ?? "").slice(0, 100) + "..." : (alt?.text ?? "")}
                 </div>
               ))}
             </div>
@@ -655,4 +688,9 @@ export function App() {
       )}
     </div>
   );
+}
+
+/* ═══ Wrapped export with ErrorBoundary ═══════════════════════════════════ */
+export function AppWithErrorBoundary() {
+  return <AppErrorBoundary><App /></AppErrorBoundary>;
 }

@@ -1363,6 +1363,7 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("message", async (buf) => {
+    try {
     const raw = safeJsonParse(String(buf));
     if (!raw || typeof raw.type !== "string") return;
 
@@ -1420,7 +1421,7 @@ wss.on("connection", (ws) => {
       emitSessionState(sessionId);
 
       // ── Send opener guidance immediately so the rep knows what to say from \"hello\" ──
-      sendOpenerGuidance(ctx);
+      try { sendOpenerGuidance(ctx); } catch (e) { console.error("[sendOpenerGuidance] error", e); }
 
       startSttMock(ctx);
       return;
@@ -1488,6 +1489,9 @@ wss.on("connection", (ws) => {
     }
 
     // flush: noop in this demo
+    } catch (err) {
+      console.error("[ws.onmessage] unhandled error — connection stays open", err);
+    }
   });
 });
 

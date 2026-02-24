@@ -304,11 +304,12 @@ export function LiveAudioPanel(props: {
         rec.continuous = true;
         rec.maxAlternatives = 1;
         rec.onresult = (event: any) => {
+          try {
           restartCountRef.current = 0; // successful result resets counter
           let interim = "";
           let finalOut = "";
           for (let i = event.resultIndex; i < event.results.length; i++) {
-            const transcript = String(event.results[i][0]?.transcript || "").trim();
+            const transcript = String(event.results[i]?.[0]?.transcript || "").trim();
             if (!transcript) continue;
             if (event.results[i].isFinal) finalOut += `${transcript} `;
             else interim += `${transcript} `;
@@ -321,6 +322,7 @@ export function LiveAudioPanel(props: {
             setFinalText(f);
             sendFrame(0.5, p || undefined, f).catch(() => undefined);
           }
+          } catch (err) { console.error("[SpeechRecognition.onresult] error", err); }
         };
         rec.onerror = (ev: any) => {
           const code = ev?.error || "unknown";
