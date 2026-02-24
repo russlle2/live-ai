@@ -27,11 +27,19 @@ import { dispatchIntegrationEvent } from "./integrations/universal_dispatch";
 import { buildOauthAuthorizeUrl, exchangeOauthCode } from "./integrations/oauth_client";
 import { createOauthState, consumeOauthState, upsertOauthTokens, type OAuthProvider, getOauthAccessToken } from "./integrations/oauth_store";
 import { analyzeConversationV1 } from "./conversation/ci_v1";
-import { createSessionMemory, updateTranscript } from "./arbitration/session_memory_v1";
+import { createSessionMemory, updateTranscript, type SpeakerRoleV1 } from "./arbitration/session_memory_v1";
 import { detectMomentV1 } from "./arbitration/moment_detector_v1";
 import { pickPlaybookV1 } from "./arbitration/playbooks_v1";
 import { inferStageV1 } from "./arbitration/stage_detector_v1";
 import { buildCoachOverlayPatchV1 } from "./arbitration/coach_engine_pro_v1";
+import {
+  createDiarizationState,
+  classifySpeaker,
+  getSpeakerStats,
+  injectProductVocabulary,
+  type DiarizationState,
+  type ClassifyResult
+} from "./conversation/speaker_diarization_v1";
 
 type SessionCtx = {
   sessionId: string;
@@ -49,6 +57,8 @@ type SessionCtx = {
   productContext?: SessionProductContext;
   /** History of guidance dashboard snapshots for the session */
   guidanceHistory: GuidanceDashboardSnapshot[];
+  /** Speaker diarization engine state */
+  diarization: DiarizationState;
 };
 
 /** Product/service context the user provides per session */
@@ -76,6 +86,16 @@ export type GuidanceDashboardSnapshot = {
   riskAlerts: Array<{ type: string; message: string; severity: string }>;
   dealScore: number;
   nextMoves: string[];
+  /** Speaker diarization data */
+  speakerData: {
+    lastSpeaker: string;
+    talkRatio: { rep: number; customer: number };
+    repTurns: number;
+    customerTurns: number;
+    lastCustomerText: string;
+    lastRepText: string;
+    coachingContext: { customerIntent?: string; repAssessment?: string };
+  };
 };
 
 const DEFAULT_CONTROLS: GuidanceControls = {
@@ -122,7 +142,8 @@ app.post("/api/demo/transcript_final", async (req, res) => {
       memory: createSessionMemory(),
       connectedDevices: new Map(),
       learning: { helpful: 0, unhelpful: 0, ignored: 0 },
-      guidanceHistory: []
+      guidanceHistory: [],
+      diarization: createDiarizationState()
     } as any;
 
     sessions.set(session_id, ctx as any);
@@ -309,11 +330,31 @@ app.post("/api/live/audio_frame", async (req, res) => {
         memory: createSessionMemory(),
         connectedDevices: new Map(),
         learning: { helpful: 0, unhelpful: 0, ignored: 0 },
-        guidanceHistory: []
+        guidanceHistory: [],
+        diarization: createDiarizationState()
       } as any;
       sessions.set(body.sessionId, ctx as any);
     }
-    await onTranscriptFinal(ctx, finalText);
+
+    // Ensure diarization state exists (upgrade in-flight sessions)
+    if (!ctx.diarization) ctx.diarization = createDiarizationState();
+
+    // Inject product vocabulary into diarization engine if product context is set
+    if (ctx.productContext) {
+      injectProductVocabulary(ctx.diarization, ctx.productContext);
+    }
+
+    // ── Speaker diarization ──────────────────────────────────────────
+    const diaResult = classifySpeaker(ctx.diarization, {
+      text: finalText,
+      energy: body.frameEnergy,
+      explicitSpeaker: (body.speaker as any) ?? undefined,
+      deviceType: body.deviceType ?? undefined,
+      deviceRole: body.deviceRole ?? undefined,
+      timestamp: Date.now(),
+    });
+
+    await onTranscriptFinal(ctx, finalText, diaResult);
   }
 
   await emitLog({
@@ -407,7 +448,8 @@ app.post("/api/session/product_context", async (req, res) => {
       memory: createSessionMemory(),
       connectedDevices: new Map(),
       learning: { helpful: 0, unhelpful: 0, ignored: 0 },
-      guidanceHistory: []
+      guidanceHistory: [],
+      diarization: createDiarizationState()
     } as any;
     sessions.set(body.sessionId, ctx as any);
   }
@@ -497,7 +539,13 @@ const LiveAudioFrameInput = z.object({
   frameEnergy: z.number().min(0).max(1),
   partialText: z.string().max(300).optional(),
   finalText: z.string().max(2000).optional(),
-  language: z.string().max(20).optional()
+  language: z.string().max(20).optional(),
+  /** Explicit speaker label from the client ("rep" | "customer") */
+  speaker: z.enum(["rep", "customer", "unknown"]).optional(),
+  /** Device role for diarization attribution */
+  deviceRole: z.enum(["host", "controller", "viewer"]).optional(),
+  /** Device type for diarization */
+  deviceType: z.string().max(30).optional()
 });
 
 const ConversationIntelInput = z.object({
@@ -758,7 +806,7 @@ function applyLearningSignal(ctx: SessionCtx, outcome: "helpful" | "unhelpful" |
   }
 }
 
-async function onTranscriptFinal(ctx: SessionCtx, text: string) {
+async function onTranscriptFinal(ctx: SessionCtx, text: string, diaResult?: ClassifyResult) {
   const privacy = await getPrivacyControls(ctx.tenantId);
   if (privacy.transcriptOptOut) {
     await emitLog({
@@ -777,8 +825,12 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string) {
   // Safety: ensure memory exists (demo routes may call onTranscriptFinal without WS ctx init)
   if (!ctx.memory) ctx.memory = createSessionMemory();
 
-  // Safety: ensure memory exists (demo routes may call onTranscriptFinal without WS ctx init)
-  if (!ctx.memory) ctx.memory = createSessionMemory();
+  // Speaker attribution
+  const speaker: SpeakerRoleV1 = diaResult?.speaker ?? "unknown";
+  const speakerConfidence = diaResult?.confidence ?? 0;
+
+  // Update transcript with speaker attribution
+  updateTranscript(ctx.memory, text, speaker, speakerConfidence);
 
   // Throttle: no more than 1 suggestion per 800ms per session (fast enough for live coaching)
   const now = Date.now();
@@ -812,7 +864,31 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string) {
     }
   });
 
-  broadcast(ctx.sessionId, { type: "transcript_final", session_id: ctx.sessionId, seq: ctx.seq, at: new Date().toISOString(), text });
+  broadcast(ctx.sessionId, {
+    type: "transcript_final",
+    session_id: ctx.sessionId,
+    seq: ctx.seq,
+    at: new Date().toISOString(),
+    text,
+    speaker,
+    speakerConfidence
+  });
+
+  // Broadcast speaker turn event (richer diarization data for UI)
+  if (diaResult) {
+    broadcast(ctx.sessionId, {
+      type: "speaker_turn",
+      session_id: ctx.sessionId,
+      seq: ctx.seq,
+      at: new Date().toISOString(),
+      speaker,
+      text,
+      confidence: speakerConfidence,
+      isNewTurn: diaResult.isNewTurn,
+      coachingContext: diaResult.coachingContext,
+      talkRatio: ctx.memory.talkRatio,
+    } as any);
+  }
 
   // Coach engine (Path A): stage + moment + micro-goal + product packs + confidence + guidance items
   let built = await buildCoachOverlayPatchV1({
@@ -821,7 +897,8 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string) {
     sessionId: ctx.sessionId,
     controls: ctx.controls,
     memory: ctx.memory,
-    text
+    text,
+    speaker
   });
 
   // Track last primary sales moment for off-topic bridges (integration/price/security/etc.)
@@ -1020,11 +1097,49 @@ function buildGuidanceDashboard(ctx: SessionCtx, text: string, built: any, intel
     riskAlerts.push({ type: "stalled_deal", message: "Momentum is low — consider suggesting a concrete next step", severity: "medium" });
   }
 
+  // Talk ratio risk: rep monopolizing conversation
+  const speakerTx = ctx.memory?.speakerTranscript ?? [];
+  const talkRatio = ctx.memory?.talkRatio ?? { rep: 50, customer: 50 };
+  if (talkRatio.rep > 70 && (ctx.memory?.speakerStats?.rep?.turns ?? 0) >= 4) {
+    riskAlerts.push({ type: "rep_talk_ratio", message: `You're at ${talkRatio.rep}% talk time — let the customer speak more. Ask an open-ended question.`, severity: "high" });
+  }
+  if (talkRatio.customer > 80 && (ctx.memory?.speakerStats?.customer?.turns ?? 0) >= 6) {
+    riskAlerts.push({ type: "customer_monologue", message: "Customer is dominating the conversation — good listening, but consider summarizing and redirecting.", severity: "low" });
+  }
+
   // Deal score (0-100)
   const dealScore = computeDealScore(stage, momentum, buyerSentiment, detectedObjections.length, transcript.length);
 
   // Next moves (predictive)
   const nextMoves = predictNextMoves(stage, meta?.moment, buyerSentiment, pCtx);
+
+  // Speaker diarization data
+  const lastCustomerEntry = [...speakerTx].reverse().find(e => e.speaker === "customer");
+  const lastRepEntry = [...speakerTx].reverse().find(e => e.speaker === "rep");
+  const lastSpeaker = ctx.memory?.lastSpeaker ?? "unknown";
+  // Find coaching context from latest diarization result
+  const latestDiaEntry = ctx.diarization?.turns?.length ? ctx.diarization.turns[ctx.diarization.turns.length - 1] : null;
+  const coachingContext: { customerIntent?: string; repAssessment?: string } = {};
+
+  // Infer last coaching context from last classified turns
+  if (lastSpeaker === "customer" && latestDiaEntry) {
+    const custPatterns = (latestDiaEntry.signals ?? []).filter((s: any) => s.type === "linguistic" && s.value === "customer");
+    if (custPatterns.length) coachingContext.customerIntent = (custPatterns[0] as any).patterns?.[0] ?? "general_statement";
+  }
+  if (lastSpeaker === "rep" && latestDiaEntry) {
+    const repPatterns = (latestDiaEntry.signals ?? []).filter((s: any) => s.type === "linguistic" && s.value === "rep");
+    if (repPatterns.length) coachingContext.repAssessment = (repPatterns[0] as any).patterns?.[0] ?? "neutral_statement";
+  }
+
+  const speakerData = {
+    lastSpeaker,
+    talkRatio,
+    repTurns: ctx.memory?.speakerStats?.rep?.turns ?? 0,
+    customerTurns: ctx.memory?.speakerStats?.customer?.turns ?? 0,
+    lastCustomerText: lastCustomerEntry?.text ?? "",
+    lastRepText: lastRepEntry?.text ?? "",
+    coachingContext,
+  };
 
   return {
     timestamp: new Date().toISOString(),
@@ -1037,7 +1152,8 @@ function buildGuidanceDashboard(ctx: SessionCtx, text: string, built: any, intel
     talkingPoints,
     riskAlerts,
     dealScore,
-    nextMoves
+    nextMoves,
+    speakerData,
   };
 }
 
@@ -1190,7 +1306,8 @@ wss.on("connection", (ws) => {
         memory: createSessionMemory(),
         connectedDevices: new Map(),
         learning: { helpful: 0, unhelpful: 0, ignored: 0 },
-        guidanceHistory: []
+        guidanceHistory: [],
+        diarization: createDiarizationState()
       };
 
       if (ctx.tenantId !== tenantId || ctx.repId !== repId) {

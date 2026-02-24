@@ -44,6 +44,21 @@ export function App() {
   const [audioRunning, setAudioRunning] = useState(false);
   const [guidanceDashboard, setGuidanceDashboard] = useState<GuidanceDashboard | null>(null);
   const [guidanceHistory, setGuidanceHistory] = useState<GuidanceDashboard[]>([]);
+  const [speakerTurn, setSpeakerTurn] = useState<{
+    speaker: "rep" | "customer" | "unknown";
+    text: string;
+    confidence: number;
+    isNewTurn: boolean;
+    talkRatio: { rep: number; customer: number };
+    coachingContext: { customerIntent?: string; repAssessment?: string };
+  } | null>(null);
+
+  const currentHost = window.location.hostname;
+  const mobileHost = (currentHost === "localhost" || currentHost === "127.0.0.1")
+    ? "<YOUR-LAPTOP-IP>"
+    : currentHost;
+  const mobileWebUrl = `http://${mobileHost}:5173`;
+  const mobileAppUrl = `http://${mobileHost}:5174`;
 
   const applyPatch = (patch: any) => {
     setOverlayState((s: any) => {
@@ -150,6 +165,18 @@ export function App() {
           setGuidanceHistory(h => [...h, d].slice(-50));
         }
       }
+
+      if ((msg as any).type === "speaker_turn") {
+        const st = msg as any;
+        setSpeakerTurn({
+          speaker: st.speaker ?? "unknown",
+          text: st.text ?? "",
+          confidence: st.confidence ?? 0,
+          isNewTurn: Boolean(st.isNewTurn),
+          talkRatio: st.talkRatio ?? { rep: 50, customer: 50 },
+          coachingContext: st.coachingContext ?? {},
+        });
+      }
     };
 
     next.onclose = () => {
@@ -232,6 +259,36 @@ export function App() {
         )}
       </div>
 
+      <div className="oa-card" style={{ marginBottom: 12, padding: 10 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6 }}>Mobile URLs</div>
+        <div style={{ display: "grid", gridTemplateColumns: "110px 1fr auto", gap: 6, alignItems: "center", fontSize: 12 }}>
+          <span className="oa-subtle">Web (phone):</span>
+          <span>{mobileWebUrl}</span>
+          <button
+            className="oa-btn-sm"
+            onClick={() => navigator.clipboard?.writeText(mobileWebUrl).catch(() => undefined)}
+            style={{ marginLeft: 0 }}
+          >
+            Copy
+          </button>
+
+          <span className="oa-subtle">Mobile app:</span>
+          <span>{mobileAppUrl}</span>
+          <button
+            className="oa-btn-sm"
+            onClick={() => navigator.clipboard?.writeText(mobileAppUrl).catch(() => undefined)}
+            style={{ marginLeft: 0 }}
+          >
+            Copy
+          </button>
+        </div>
+        {(currentHost === "localhost" || currentHost === "127.0.0.1") ? (
+          <div className="oa-subtle" style={{ fontSize: 11, marginTop: 6 }}>
+            Replace <b>&lt;YOUR-LAPTOP-IP&gt;</b> with your computer LAN IP (example: 192.168.1.24).
+          </div>
+        ) : null}
+      </div>
+
       <div className="oa-tabbar">
         <button onClick={() => setTab("demo")} disabled={tab === "demo"}>
           Live Demo
@@ -266,6 +323,7 @@ export function App() {
                 sessionId={sessionId}
                 timelinePush={latestTimelineEvent}
                 onAudioStateChange={setAudioRunning}
+                speakerTurn={speakerTurn}
               />
 
               {/* Quick inject */}

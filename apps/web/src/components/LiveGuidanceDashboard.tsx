@@ -13,6 +13,16 @@ export type GuidanceDashboard = {
   riskAlerts: Array<{ type: string; message: string; severity: string }>;
   dealScore: number;
   nextMoves: string[];
+  /** Speaker diarization data */
+  speakerData?: {
+    lastSpeaker: string;
+    talkRatio: { rep: number; customer: number };
+    repTurns: number;
+    customerTurns: number;
+    lastCustomerText: string;
+    lastRepText: string;
+    coachingContext: { customerIntent?: string; repAssessment?: string };
+  };
 };
 
 const STAGE_COLORS: Record<string, string> = {
@@ -140,6 +150,84 @@ export function LiveGuidanceDashboard(props: {
           <DealScoreGauge score={dashboard.dealScore} />
         </div>
       </div>
+
+      {/* ─── SPEAKER CONTEXT (who just said what) ─── */}
+      {dashboard.speakerData && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          {/* Customer's last statement */}
+          <div className="oa-card" style={{ padding: "8px 12px", borderLeft: "3px solid #fbbf24" }}>
+            <div style={{ fontSize: 11, color: "#fbbf24", fontWeight: 700, marginBottom: 4, display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{
+                width: 8, height: 8, borderRadius: "50%", background: "#fbbf24",
+                boxShadow: dashboard.speakerData.lastSpeaker === "customer" ? "0 0 6px #fbbf24" : "none",
+                animation: dashboard.speakerData.lastSpeaker === "customer" ? "pulse 1.5s infinite" : "none",
+              }} />
+              CUSTOMER SAID
+            </div>
+            <div style={{ fontSize: 13, lineHeight: 1.4, color: "#cbd5e1", minHeight: 28 }}>
+              {dashboard.speakerData.lastCustomerText
+                ? `"${dashboard.speakerData.lastCustomerText.length > 120 ? dashboard.speakerData.lastCustomerText.slice(0, 120) + "..." : dashboard.speakerData.lastCustomerText}"`
+                : <span style={{ color: "#4b5e77", fontStyle: "italic" }}>Waiting for customer to speak...</span>
+              }
+            </div>
+            {dashboard.speakerData.coachingContext?.customerIntent && (
+              <div style={{ fontSize: 10, color: "#9db2ce", marginTop: 4, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                Intent: {dashboard.speakerData.coachingContext.customerIntent.replace(/_/g, " ")}
+              </div>
+            )}
+          </div>
+
+          {/* Rep's last statement */}
+          <div className="oa-card" style={{ padding: "8px 12px", borderLeft: "3px solid #60a5fa" }}>
+            <div style={{ fontSize: 11, color: "#60a5fa", fontWeight: 700, marginBottom: 4, display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{
+                width: 8, height: 8, borderRadius: "50%", background: "#60a5fa",
+                boxShadow: dashboard.speakerData.lastSpeaker === "rep" ? "0 0 6px #60a5fa" : "none",
+                animation: dashboard.speakerData.lastSpeaker === "rep" ? "pulse 1.5s infinite" : "none",
+              }} />
+              YOU SAID
+            </div>
+            <div style={{ fontSize: 13, lineHeight: 1.4, color: "#cbd5e1", minHeight: 28 }}>
+              {dashboard.speakerData.lastRepText
+                ? `"${dashboard.speakerData.lastRepText.length > 120 ? dashboard.speakerData.lastRepText.slice(0, 120) + "..." : dashboard.speakerData.lastRepText}"`
+                : <span style={{ color: "#4b5e77", fontStyle: "italic" }}>Waiting for you to speak...</span>
+              }
+            </div>
+            {dashboard.speakerData.coachingContext?.repAssessment && (
+              <div style={{ fontSize: 10, color: "#9db2ce", marginTop: 4, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                Assessment: {dashboard.speakerData.coachingContext.repAssessment.replace(/_/g, " ")}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ─── TALK RATIO BAR ─── */}
+      {dashboard.speakerData && (dashboard.speakerData.repTurns > 0 || dashboard.speakerData.customerTurns > 0) && (
+        <div className="oa-card" style={{ padding: "8px 12px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#9db2ce", marginBottom: 4 }}>
+            <span style={{ color: "#60a5fa", fontWeight: 700 }}>🎙️ You ({dashboard.speakerData.talkRatio.rep}%) • {dashboard.speakerData.repTurns} turns</span>
+            <span style={{ color: "#fbbf24", fontWeight: 700 }}>👤 Customer ({dashboard.speakerData.talkRatio.customer}%) • {dashboard.speakerData.customerTurns} turns</span>
+          </div>
+          <div style={{ display: "flex", height: 8, borderRadius: 4, overflow: "hidden", background: "#1a2538" }}>
+            <div style={{
+              width: `${dashboard.speakerData.talkRatio.rep}%`, height: "100%",
+              background: dashboard.speakerData.talkRatio.rep > 65 ? "#ff9ca8" : "#60a5fa",
+              transition: "width 0.5s ease, background 0.3s ease"
+            }} />
+            <div style={{
+              width: `${dashboard.speakerData.talkRatio.customer}%`, height: "100%",
+              background: "#fbbf24",
+              transition: "width 0.5s ease"
+            }} />
+          </div>
+          {dashboard.speakerData.talkRatio.rep > 65 && (
+            <div style={{ fontSize: 10, color: "#ff9ca8", marginTop: 3, fontWeight: 600 }}>
+              ⚠ You're talking too much — aim for 40-60% talk time. Ask an open-ended question.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ─── PRIMARY SUGGESTION (hero) ─── */}
       {dashboard.primary && (

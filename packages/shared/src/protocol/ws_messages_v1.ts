@@ -8,6 +8,26 @@ import type {
   CoachCorrectionMetaV1
 } from "../types/core_types_v1";
 
+/** Speaker role in diarization */
+export type SpeakerRoleWsV1 = "rep" | "customer" | "unknown";
+
+/** Speaker turn event — broadcast when a speaker-attributed transcript line is processed */
+export type SpeakerTurnV1 = {
+  type: "speaker_turn";
+  session_id: string;
+  seq: number;
+  at: string;
+  speaker: SpeakerRoleWsV1;
+  text: string;
+  confidence: number;
+  isNewTurn: boolean;
+  coachingContext: {
+    customerIntent?: string;
+    repAssessment?: string;
+  };
+  talkRatio: { rep: number; customer: number };
+};
+
 export const WS_CLIENT_MESSAGE_TYPES_V1 = ["start", "flush", "stop", "ping", "control", "learning_signal"] as const;
 
 export type WsClientMessageV1 =
@@ -24,6 +44,10 @@ export type TranscriptFinalV1 = {
   seq: number;
   at: string;
   text: string;
+  /** Speaker attribution (diarization result) */
+  speaker?: SpeakerRoleWsV1;
+  /** Diarization confidence 0-1 */
+  speakerConfidence?: number;
 };
 
 export type WsServerMessageV1 =
@@ -48,6 +72,7 @@ export type WsServerMessageV1 =
       };
     }
   | TranscriptFinalV1
+  | SpeakerTurnV1
   | { type: "overlay_message"; session_id: string; at: string; message: OverlayMessageV1 }
   | { type: "guidance_dashboard"; session_id: string; at: string; dashboard: Record<string, unknown> }
   | { type: "error"; at: string; message: string; code: string; session_id?: string };

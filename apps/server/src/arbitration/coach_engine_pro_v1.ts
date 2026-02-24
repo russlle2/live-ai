@@ -105,11 +105,19 @@ export async function buildCoachOverlayPatchV1(args: {
   controls: GuidanceControls;
   memory: any;
   text: string;
+  speaker?: "rep" | "customer" | "unknown";
 }): Promise<{ suppressed: boolean; patch?: any; meta?: any; decision?: any }> {
   const { controls, memory } = args;
   const text = safeString(args.text);
   const tNorm = text.toLowerCase();
   const now = Date.now();
+  const speaker = args.speaker ?? "unknown";
+
+  // ── Rep-specific coaching: evaluate what the rep just said ──────────
+  // When the rep speaks, we don't suggest "say this" — instead we evaluate their performance
+  if (speaker === "rep") {
+    return buildRepFeedback(text, tNorm, memory, now);
+  }
 
   // 1) Run your existing engine (keeps product packs + your current intent logic)
   let built: any;
@@ -272,5 +280,137 @@ export async function buildCoachOverlayPatchV1(args: {
     patch,
     meta: { ...(baseMeta ?? {}), ...meta },
     decision: built?.decision
+  };
+}
+
+// ─── Rep Feedback Engine ─────────────────────────────────────────────────────
+// When the REP speaks, evaluate what they said and provide live coaching feedback.
+
+function buildRepFeedback(
+  text: string,
+  tNorm: string,
+  memory: any,
+  now: number
+): { suppressed: boolean; patch?: any; meta?: any; decision?: any } {
+  const wordCount = text.split(/\s+/).length;
+
+  // Detect what the rep is doing
+  let assessment: "strong" | "good" | "adjust" | "warning" = "good";
+  let feedback = "";
+  let tip = "";
+  let category = "rep_feedback";
+
+  // ── Check for strong patterns ──────────────────────────────────────
+  if (/\b(great question|absolutely|totally understand|that(?:'s| is) a fair (?:point|concern))\b/i.test(tNorm)) {
+    assessment = "strong";
+    feedback = "Good acknowledgment — the customer feels heard.";
+    tip = "Now follow up with a targeted question or value statement.";
+    category = "rep_acknowledgment";
+  } else if (/\b(what(?:'s| is) (?:the|your)|tell me about|how do you|walk me through)\b/i.test(tNorm)) {
+    assessment = "strong";
+    feedback = "Great — you're asking questions and driving discovery.";
+    tip = "Listen to their answer carefully before pivoting to a solution.";
+    category = "rep_discovery";
+  } else if (/\b(roi|save you|reduce (?:cost|time)|increase (?:revenue|efficiency)|return on)\b/i.test(tNorm)) {
+    assessment = "strong";
+    feedback = "Good value framing — tie the ROI to their specific situation.";
+    tip = "Ask: 'Does that match what you're seeing internally?'";
+    category = "rep_value_prop";
+  } else if (/\b(next step|follow[- ]?up|schedule|book|calendar|let(?:'s| us) (?:set|book|schedule))\b/i.test(tNorm)) {
+    assessment = "strong";
+    feedback = "Strong close attempt — you're driving toward commitment.";
+    tip = "If they hesitate, ask what would make them comfortable moving forward.";
+    category = "rep_close_attempt";
+  }
+
+  // ── Check for adjustable patterns ──────────────────────────────────
+  if (!feedback) {
+    if (/\b(we (?:offer|provide|have|can)|our (?:platform|product|solution|team))\b/i.test(tNorm) && wordCount > 40) {
+      assessment = "adjust";
+      feedback = "You're pitching, but it's getting long. Customers tune out after ~20 seconds.";
+      tip = "Break it up: pause and ask 'Does that resonate with what you need?'";
+      category = "rep_monologue";
+    } else if (/\b(we (?:offer|provide|have|can)|our (?:platform|product|solution|team))\b/i.test(tNorm)) {
+      assessment = "good";
+      feedback = "Good — you're presenting your solution.";
+      tip = "Tie it back to something the customer said earlier.";
+      category = "rep_pitch";
+    } else if (/\b(case study|customer(?:s)?(?:\s+(?:like|similar))|proof point|testimonial)\b/i.test(tNorm)) {
+      assessment = "strong";
+      feedback = "Social proof is powerful — nicely played.";
+      tip = "Make it specific: mention the customer's industry if you can.";
+      category = "rep_social_proof";
+    } else if (/\b(free trial|pilot|poc|proof of concept|sandbox)\b/i.test(tNorm)) {
+      assessment = "good";
+      feedback = "Good offer — but make sure you've established value first.";
+      tip = "Frame the trial around their #1 use case, not as a generic demo.";
+      category = "rep_offer";
+    }
+  }
+
+  // ── Warning patterns ───────────────────────────────────────────────
+  if (!feedback) {
+    if (/\b(honestly|to be honest|between us|off the record)\b/i.test(tNorm)) {
+      assessment = "warning";
+      feedback = "Careful — 'to be honest' can undermine trust. It implies you weren't being honest before.";
+      tip = "Drop the qualifier and just state the fact directly.";
+      category = "rep_trust_risk";
+    } else if (/\b(i(?:'m| am) not sure|i don(?:'t| not) know|let me check|good question,? i)\b/i.test(tNorm)) {
+      assessment = "adjust";
+      feedback = "It's OK to not know — but frame it as action, not uncertainty.";
+      tip = "Say: 'I want to give you the exact answer — I'll verify and follow up by [time].'";
+      category = "rep_uncertainty";
+    } else if (/\b(um+|uh+|like,?\s+like|you know|basically|sort of|kind of)\b/i.test(tNorm) && (tNorm.match(/\bum+|\buh+/gi) || []).length >= 2) {
+      assessment = "adjust";
+      feedback = "Multiple filler words detected. Take a breath — pausing shows confidence.";
+      tip = "A 2-second silence is more powerful than 'um'.";
+      category = "rep_filler_words";
+    }
+  }
+
+  // ── Fallback ───────────────────────────────────────────────────────
+  if (!feedback) {
+    feedback = "You're speaking — the AI is listening and evaluating.";
+    tip = "Keep it concise. The best reps speak less than 40% of the time.";
+    category = "rep_general";
+  }
+
+  // ── Talk-ratio warning ─────────────────────────────────────────────
+  const repWords = memory?.speakerStats?.rep?.words ?? 0;
+  const custWords = memory?.speakerStats?.customer?.words ?? 0;
+  if (repWords > 100 && custWords > 0 && repWords / (custWords || 1) > 2.5) {
+    assessment = "warning";
+    feedback = `Talk ratio alert: You've said ${repWords} words vs. the customer's ${custWords}. Ask a question to rebalance.`;
+    tip = "Try: 'What's your take on that?' or 'How does that map to your situation?'";
+    category = "rep_talk_ratio";
+  }
+
+  const assessmentEmoji = assessment === "strong" ? "💪" : assessment === "good" ? "👍" : assessment === "warning" ? "⚠️" : "💡";
+
+  const item: GuidanceItemV1 = {
+    id: randId("rf"),
+    title: `${assessmentEmoji} Rep feedback: ${category.replace(/_/g, " ")}`,
+    category: `rep_feedback/${category}`,
+    text: `${feedback} TIP: ${tip}`,
+    confidence: assessment === "strong" ? 0.85 : assessment === "good" ? 0.7 : assessment === "warning" ? 0.9 : 0.6,
+    confidenceBand: assessment === "warning" ? "high" : assessment === "strong" ? "high" : "medium",
+    createdAt: new Date().toISOString(),
+    explanation: {
+      followUp: tip,
+      rationale: category,
+      meta: { speaker: "rep", assessment, category }
+    } as any
+  };
+
+  const patch = {
+    text: `${assessmentEmoji} ${feedback}`,
+    guidance: { items: [item] }
+  };
+
+  return {
+    suppressed: false,
+    patch,
+    meta: { speaker: "rep", assessment, category, stage: memory?.pro?.stage ?? "discovery" },
+    decision: { type: "rep_feedback", assessment }
   };
 }

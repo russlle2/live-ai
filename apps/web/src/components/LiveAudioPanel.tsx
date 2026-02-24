@@ -5,6 +5,24 @@ function isBluetoothLabel(label: string): boolean {
   return /bluetooth|airpods|buds|headset|earbuds|hands-free/i.test(label || "");
 }
 
+/** Speaker role for diarization */
+type SpeakerRole = "rep" | "customer" | "unknown";
+
+/** Speaker detection mode */
+type SpeakerMode = "auto" | "rep" | "customer";
+
+const SPEAKER_COLORS: Record<SpeakerRole, string> = {
+  rep: "#60a5fa",       // blue
+  customer: "#fbbf24",  // amber
+  unknown: "#9db2ce",   // grey
+};
+
+const SPEAKER_LABELS: Record<SpeakerRole, string> = {
+  rep: "You (Rep)",
+  customer: "Customer",
+  unknown: "Speaker",
+};
+
 export function LiveAudioPanel(props: {
   tenantId: string;
   repId: string;
@@ -24,6 +42,15 @@ export function LiveAudioPanel(props: {
       confidence: number;
     };
   } | null;
+  /** Speaker turn data from WS */
+  speakerTurn?: {
+    speaker: SpeakerRole;
+    text: string;
+    confidence: number;
+    isNewTurn: boolean;
+    talkRatio: { rep: number; customer: number };
+    coachingContext: { customerIntent?: string; repAssessment?: string };
+  } | null;
 }) {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
@@ -35,9 +62,15 @@ export function LiveAudioPanel(props: {
   const [manualText, setManualText] = useState("");
   const [intelSummary, setIntelSummary] = useState<string>("");
   const [error, setError] = useState("");
-  const [transcriptLines, setTranscriptLines] = useState<Array<{ at: string; text: string }>>([]);
+  const [transcriptLines, setTranscriptLines] = useState<Array<{ at: string; text: string; speaker: SpeakerRole }>>([]);
   const [complianceAlerts, setComplianceAlerts] = useState<Array<{ at: string; type: string; severity: string; phrase: string }>>([]);
   const [momentTimeline, setMomentTimeline] = useState<Array<{ at: string; moments: string[]; objections: string[]; riskCount: number }>>([]);
+  /** Speaker detection mode: auto (AI decides), or manual override */
+  const [speakerMode, setSpeakerMode] = useState<SpeakerMode>("auto");
+  /** Current active speaker indicator */
+  const [activeSpeaker, setActiveSpeaker] = useState<SpeakerRole>("unknown");
+  /** Talk ratio from server */
+  const [talkRatio, setTalkRatio] = useState<{ rep: number; customer: number }>({ rep: 50, customer: 50 });
 
   const streamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -66,7 +99,7 @@ export function LiveAudioPanel(props: {
     const at = event.createdAt || new Date().toISOString();
 
     if (event.textExcerpt && event.textExcerpt.trim()) {
-      setTranscriptLines((prev) => [{ at, text: event.textExcerpt.trim() }, ...prev].slice(0, 60));
+      setTranscriptLines((prev) => [{ at, text: event.textExcerpt.trim(), speaker: "unknown" as SpeakerRole }, ...prev].slice(0, 60));
     }
 
     setMomentTimeline((prev) => [{ at, moments: event.moments || [], objections: event.objections || [], riskCount: Array.isArray(event.complianceRisks) ? event.complianceRisks.length : 0 }, ...prev].slice(0, 60));
@@ -102,7 +135,7 @@ export function LiveAudioPanel(props: {
       setTranscriptLines(
         items
           .filter((x: any) => typeof x?.textExcerpt === "string" && x.textExcerpt.trim().length > 0)
-          .map((x: any) => ({ at: String(x.createdAt || new Date().toISOString()), text: String(x.textExcerpt) }))
+          .map((x: any) => ({ at: String(x.createdAt || new Date().toISOString()), text: String(x.textExcerpt), speaker: "unknown" as SpeakerRole }))
       );
       setMomentTimeline(
         items.map((x: any) => ({
@@ -133,14 +166,18 @@ export function LiveAudioPanel(props: {
   };
 
   const sendFrame = async (frameEnergy: number, partial?: string, final?: string) => {
-    const payload = {
+    const explicitSpeaker = speakerMode !== "auto" ? speakerMode : undefined;
+    const payload: Record<string, unknown> = {
       tenantId: props.tenantId,
       repId: props.repId,
       sessionId: props.sessionId,
       frameEnergy: Math.max(0, Math.min(1, frameEnergy)),
       partialText: partial || undefined,
       finalText: final || undefined,
-      language: "en-US"
+      language: "en-US",
+      speaker: explicitSpeaker,
+      deviceRole: "host",
+      deviceType: /Mobi|Android|iPhone/i.test(navigator.userAgent) ? "mobile" : "desktop",
     };
 
     const res = await fetch(`${API_BASE}/api/live/audio_frame`, {
@@ -158,7 +195,9 @@ export function LiveAudioPanel(props: {
 
     if (final && final.trim()) {
       const at = new Date().toISOString();
-      setTranscriptLines((prev) => [{ at, text: final.trim() }, ...prev].slice(0, 40));
+      // Speaker inference: use explicit mode, or fall back to "unknown" (server will diarize)
+      const lineSpeaker: SpeakerRole = speakerMode !== "auto" ? speakerMode : "unknown";
+      setTranscriptLines((prev) => [{ at, text: final.trim(), speaker: lineSpeaker }, ...prev].slice(0, 40));
 
       const objections = entities
         .filter((e: any) => e && e.type === "objection_type")
@@ -340,12 +379,95 @@ export function LiveAudioPanel(props: {
     applyTimelineEvent({ ...ev, createdAt: ev.createdAt || pushed.at || new Date().toISOString() } as any);
   }, [props.timelinePush]);
 
+  // Update transcript with server-classified speaker data
+  useEffect(() => {
+    const turn = props.speakerTurn;
+    if (!turn?.text) return;
+    setActiveSpeaker(turn.speaker);
+    setTalkRatio(turn.talkRatio);
+    
+    // Update the most recent transcript line with the server's speaker classification
+    setTranscriptLines((prev) => {
+      if (prev.length === 0) return prev;
+      const first = prev[0];
+      // If the text matches the most recent line, update its speaker
+      if (first.text === turn.text.trim() || first.text.startsWith(turn.text.trim().slice(0, 30))) {
+        return [{ ...first, speaker: turn.speaker }, ...prev.slice(1)];
+      }
+      // Otherwise add as new line
+      return [{ at: new Date().toISOString(), text: turn.text, speaker: turn.speaker }, ...prev].slice(0, 60);
+    });
+  }, [props.speakerTurn]);
+
   return (
     <div className="oa-card">
-      <h3 style={{ marginTop: 0 }}>Live Audio (Bluetooth-first)</h3>
+      <h3 style={{ marginTop: 0 }}>Live Audio (Bluetooth-first) + Speaker Detection</h3>
       <div className="oa-subtle" style={{ fontSize: 12, marginBottom: 8 }}>
-        Streams VAD + STT frames into coaching via <b>/api/live/audio_frame</b>.
+        Streams VAD + STT frames with <b>speaker diarization</b> into coaching.
       </div>
+
+      {/* ─── Speaker Mode Toggle ─── */}
+      <div style={{ 
+        display: "flex", gap: 6, marginBottom: 10, padding: "6px 8px",
+        background: "rgba(96,165,250,0.06)", borderRadius: 8, alignItems: "center"
+      }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: "#9db2ce", marginRight: 4 }}>SPEAKER:</span>
+        {(["auto", "rep", "customer"] as SpeakerMode[]).map((mode) => (
+          <button
+            key={mode}
+            onClick={() => setSpeakerMode(mode)}
+            style={{
+              padding: "3px 10px",
+              fontSize: 11,
+              fontWeight: speakerMode === mode ? 800 : 400,
+              borderRadius: 6,
+              border: speakerMode === mode ? "1.5px solid #60a5fa" : "1px solid #2b3a51",
+              background: speakerMode === mode ? "rgba(96,165,250,0.15)" : "transparent",
+              color: speakerMode === mode ? "#fff" : "#9db2ce",
+              cursor: "pointer",
+              transition: "all 0.2s"
+            }}
+          >
+            {mode === "auto" ? "🤖 Auto-detect" : mode === "rep" ? "🎙️ I am Rep" : "👤 Customer"}
+          </button>
+        ))}
+        {running && activeSpeaker !== "unknown" && (
+          <span style={{ 
+            marginLeft: "auto", fontSize: 11, display: "flex", alignItems: "center", gap: 4
+          }}>
+            <span style={{
+              width: 8, height: 8, borderRadius: "50%",
+              background: SPEAKER_COLORS[activeSpeaker],
+              boxShadow: `0 0 6px ${SPEAKER_COLORS[activeSpeaker]}`,
+              animation: "pulse 1.5s infinite",
+              display: "inline-block"
+            }} />
+            <b style={{ color: SPEAKER_COLORS[activeSpeaker] }}>{SPEAKER_LABELS[activeSpeaker]}</b> speaking
+          </span>
+        )}
+      </div>
+
+      {/* ─── Talk Ratio Bar ─── */}
+      {running && (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#9db2ce", marginBottom: 3 }}>
+            <span>🎙️ Rep {talkRatio.rep}%</span>
+            <span>👤 Customer {talkRatio.customer}%</span>
+          </div>
+          <div style={{ display: "flex", height: 6, borderRadius: 3, overflow: "hidden", background: "#1a2538" }}>
+            <div style={{
+              width: `${talkRatio.rep}%`, height: "100%",
+              background: SPEAKER_COLORS.rep,
+              transition: "width 0.5s ease"
+            }} />
+            <div style={{
+              width: `${talkRatio.customer}%`, height: "100%",
+              background: SPEAKER_COLORS.customer,
+              transition: "width 0.5s ease"
+            }} />
+          </div>
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "150px 1fr", gap: 8, alignItems: "center" }}>
         <label>Input device</label>
@@ -384,14 +506,27 @@ export function LiveAudioPanel(props: {
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
         <div style={{ border: "1px solid #2b3a51", borderRadius: 8, padding: 8, minHeight: 130 }}>
-          <div style={{ fontWeight: 700, marginBottom: 6 }}>Transcript (real-time)</div>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>Transcript (speaker-labeled)</div>
           <div style={{ maxHeight: 180, overflow: "auto", fontSize: 12, lineHeight: 1.4 }}>
             {transcriptLines.length === 0 ? (
               <div className="oa-subtle">No final transcript lines yet.</div>
             ) : (
               transcriptLines.map((line, idx) => (
-                <div key={`${line.at}_${idx}`} style={{ marginBottom: 6 }}>
-                  <div className="oa-subtle" style={{ fontSize: 11 }}>{new Date(line.at).toLocaleTimeString()}</div>
+                <div key={`${line.at}_${idx}`} style={{
+                  marginBottom: 6,
+                  borderLeft: `3px solid ${SPEAKER_COLORS[line.speaker] ?? SPEAKER_COLORS.unknown}`,
+                  paddingLeft: 6
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{
+                      fontSize: 10, fontWeight: 700,
+                      color: SPEAKER_COLORS[line.speaker] ?? SPEAKER_COLORS.unknown,
+                      textTransform: "uppercase"
+                    }}>
+                      {SPEAKER_LABELS[line.speaker] ?? "Speaker"}
+                    </span>
+                    <span className="oa-subtle" style={{ fontSize: 10 }}>{new Date(line.at).toLocaleTimeString()}</span>
+                  </div>
                   <div>{line.text}</div>
                 </div>
               ))
@@ -434,9 +569,28 @@ export function LiveAudioPanel(props: {
       </div>
 
       <div style={{ marginTop: 10 }}>
+        <div style={{ display: "flex", gap: 6, marginBottom: 4 }}>
+          <span style={{ fontSize: 11, color: "#9db2ce" }}>Manual input as:</span>
+          <button
+            onClick={() => setSpeakerMode("rep")}
+            style={{
+              fontSize: 10, padding: "1px 8px", borderRadius: 4,
+              background: speakerMode === "rep" ? "rgba(96,165,250,0.2)" : "transparent",
+              border: "1px solid #2b3a51", color: SPEAKER_COLORS.rep, cursor: "pointer"
+            }}
+          >Rep</button>
+          <button
+            onClick={() => setSpeakerMode("customer")}
+            style={{
+              fontSize: 10, padding: "1px 8px", borderRadius: 4,
+              background: speakerMode === "customer" ? "rgba(251,191,36,0.2)" : "transparent",
+              border: "1px solid #2b3a51", color: SPEAKER_COLORS.customer, cursor: "pointer"
+            }}
+          >Customer</button>
+        </div>
         <textarea
           style={{ width: "100%", height: 70 }}
-          placeholder="Manual final line fallback"
+          placeholder="Manual final line fallback (speaker attribution applies)"
           value={manualText}
           onChange={(e) => setManualText(e.target.value)}
         />
