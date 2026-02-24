@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-
-const API_KEY = (import.meta as any).env?.VITE_OVERLAY_API_KEY as string | undefined;
+import { API_BASE, API_KEY, apiHeaders } from "../lib/config";
 
 function isBluetoothLabel(label: string): boolean {
   return /bluetooth|airpods|buds|headset|earbuds|hands-free/i.test(label || "");
@@ -10,6 +9,7 @@ export function LiveAudioPanel(props: {
   tenantId: string;
   repId: string;
   sessionId: string;
+  onAudioStateChange?: (running: boolean) => void;
   timelinePush?: {
     at: string;
     event: {
@@ -90,8 +90,8 @@ export function LiveAudioPanel(props: {
   const syncTimeline = async (forceHydrate = false) => {
     const sinceId = !forceHydrate && timelineCursor > 0 ? timelineCursor : 0;
     const res = await fetch(
-      `http://localhost:8080/api/conversation/timeline?tenantId=${encodeURIComponent(props.tenantId)}&sessionId=${encodeURIComponent(props.sessionId)}&limit=60${sinceId ? `&sinceId=${sinceId}` : ""}`,
-      { headers: API_KEY ? { "x-overlay-key": API_KEY } : {} }
+      `${API_BASE}/api/conversation/timeline?tenantId=${encodeURIComponent(props.tenantId)}&sessionId=${encodeURIComponent(props.sessionId)}&limit=60${sinceId ? `&sinceId=${sinceId}` : ""}`,
+      { headers: apiHeaders() }
     );
     const json = await res.json().catch(() => ({}));
     const items = Array.isArray(json?.items) ? json.items : [];
@@ -142,9 +142,9 @@ export function LiveAudioPanel(props: {
       language: "en-US"
     };
 
-    const res = await fetch("http://localhost:8080/api/live/audio_frame", {
+    const res = await fetch(`${API_BASE}/api/live/audio_frame`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(API_KEY ? { "x-overlay-key": API_KEY } : {}) },
+      headers: apiHeaders(),
       body: JSON.stringify(payload)
     });
     const json = await res.json().catch(() => ({}));
@@ -201,6 +201,7 @@ export function LiveAudioPanel(props: {
     }
     analyserRef.current = null;
     setRunning(false);
+    props.onAudioStateChange?.(false);
   };
 
   const start = async () => {
@@ -271,6 +272,7 @@ export function LiveAudioPanel(props: {
     }
 
     setRunning(true);
+    props.onAudioStateChange?.(true);
   };
 
   const refreshInputs = async () => {

@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from "react";
+import { API_BASE, apiHeaders } from "../lib/config";
 
 export function TrustDashboard(props: { tenantId: string }) {
   const [data, setData] = useState<any>(null);
 
   useEffect(() => {
     const fn = async () => {
-      const res = await fetch(`http://localhost:8080/api/trust/summary?tenantId=${encodeURIComponent(props.tenantId)}`);
+      const res = await fetch(`${API_BASE}/api/trust/summary?tenantId=${encodeURIComponent(props.tenantId)}`, { headers: apiHeaders() });
       const json = await res.json();
       setData(json.summary);
     };

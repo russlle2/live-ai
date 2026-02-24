@@ -1,4 +1,5 @@
-const API_KEY = (import.meta as any).env?.VITE_OVERLAY_API_KEY as string | undefined;
+import { API_BASE, apiHeaders } from "./config";
+
 export async function postUiEvent(e: {
   tenantId: string;
   repId: string;
@@ -6,9 +7,9 @@ export async function postUiEvent(e: {
   eventType: string;
   data?: Record<string, unknown>;
 }) {
-  await fetch("http://localhost:8080/api/ui-event", {
+  await fetch(`${API_BASE}/api/ui-event`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...(API_KEY ? { "x-overlay-key": API_KEY } : {}) },
+    headers: apiHeaders(),
     body: JSON.stringify(e)
   });
 }

@@ -6,6 +6,7 @@ import { TrustDashboard } from "./components/TrustDashboard";
 import { SetupPanel } from "./components/SetupPanel";
 import { LiveAudioPanel } from "./components/LiveAudioPanel";
 import { postUiEvent } from "./lib/api";
+import { API_BASE, WS_URL, API_KEY, apiHeaders } from "./lib/config";
 
 function newId(prefix: string) {
   return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
@@ -24,8 +25,7 @@ const DEFAULT_STATE: OverlayStateV1 = {
 };
 
 export function App() {
-  const apiKey = (import.meta as any).env?.VITE_OVERLAY_API_KEY as string | undefined;
-  const [tab, setTab] = useState<"demo" | "trust" | "audio">("demo");
+  const [tab, setTab] = useState<"demo" | "trust" | "setup">("demo");
   const [tenantId, setTenantId] = useState("tenant_demo");
   const [repId, setRepId] = useState("rep_demo");
   const [sessionId, setSessionId] = useState(() => newId("sess"));
@@ -39,11 +39,7 @@ export function App() {
   const [connectedDevices, setConnectedDevices] = useState<Array<{ id: string; type: string; name?: string }>>([]);
   const [lastCorrection, setLastCorrection] = useState<string>("");
   const [latestTimelineEvent, setLatestTimelineEvent] = useState<any>(null);
-
-  const wsUrl = useMemo(() => {
-    const host = window.location.hostname;
-    return `ws://${host}:8080/ws`;
-  }, []);
+  const [audioRunning, setAudioRunning] = useState(false);
 
   const applyPatch = (patch: any) => {
     setOverlayState((s: any) => {
@@ -100,11 +96,12 @@ export function App() {
   };
 
   const connect = () => {
+    if (ws && ws.readyState === WebSocket.OPEN) return; // already connected
     setWsStatus("connecting");
-    const next = new WebSocket(wsUrl);
+    const next = new WebSocket(WS_URL);
 
     next.onopen = () => {
-      next.send(JSON.stringify({ type: "start", session_id: sessionId, tenantId, repId, apiKey, deviceType: "desktop", clientName: "desktop-overlay", role: "host" }));
+      next.send(JSON.stringify({ type: "start", session_id: sessionId, tenantId, repId, apiKey: API_KEY, deviceType: "desktop", clientName: "desktop-overlay", role: "host" }));
     };
 
     next.onmessage = async (ev) => {
@@ -165,9 +162,9 @@ export function App() {
     const text = inputText.trim();
     if (!text) return;
     setInputText("");
-    await fetch("http://localhost:8080/api/demo/transcript_final", {
+    await fetch(`${API_BASE}/api/demo/transcript_final`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(apiKey ? { "x-overlay-key": apiKey } : {}) },
+      headers: apiHeaders(),
       body: JSON.stringify({ session_id: sessionId, text })
     });
   };
@@ -194,103 +191,134 @@ export function App() {
     await postUiEvent({ tenantId, repId, sessionId, eventType: muted ? "mute_on" : "mute_off", data: {} });
   };
 
+  const disconnect = () => {
+    if (ws) {
+      ws.send(JSON.stringify({ type: "stop", session_id: sessionId }));
+      ws.close();
+    }
+    setWs(null);
+    setWsStatus("disconnected");
+  };
+
   return (
     <div className="oa-web-shell">
-      <h2 className="oa-title">Overlay Assistant Universal Coach</h2>
+      <h2 className="oa-title">Overlay Assistant — Live Sales Coach</h2>
+
+      {/* ─── Persistent status bar (always visible) ─── */}
+      <div className="oa-status-bar">
+        <span>
+          Session: <b className={wsStatus === "ready" ? "oa-status-ready" : "oa-subtle"}>{wsStatus === "ready" ? "Connected" : wsStatus === "connecting" ? "Connecting…" : "Disconnected"}</b>
+        </span>
+        {audioRunning && <span className="oa-status-ready">● Audio live</span>}
+        <span className="oa-subtle" style={{ fontSize: 11 }}>
+          {connectedDevices.length ? `Devices: ${connectedDevices.map((d) => d.type).join(", ")}` : "No devices"}
+        </span>
+        {wsStatus !== "ready" ? (
+          <button className="oa-btn-sm" onClick={() => connect()}>Start Session</button>
+        ) : (
+          <button className="oa-btn-sm" onClick={() => disconnect()}>End Session</button>
+        )}
+      </div>
 
       <div className="oa-tabbar">
         <button onClick={() => setTab("demo")} disabled={tab === "demo"}>
-          Demo
+          Live Demo
         </button>
         <button onClick={() => setTab("trust")} disabled={tab === "trust"}>
           Trust Dashboard
         </button>
-        <button onClick={() => setTab("audio")} disabled={tab === "audio"}>
-          Live Audio
+        <button onClick={() => setTab("setup")} disabled={tab === "setup"}>
+          Setup &amp; Privacy
         </button>
       </div>
 
       {tab === "trust" ? (
         <TrustDashboard tenantId={tenantId} />
-      ) : tab === "audio" ? (
-        <LiveAudioPanel tenantId={tenantId} repId={repId} sessionId={sessionId} timelinePush={latestTimelineEvent} />
+      ) : tab === "setup" ? (
+        <SetupPanel tenantId={tenantId} sessionId={sessionId} />
       ) : (
-        <div className="oa-grid">
-          <div className="oa-card">
-            <h3>Session</h3>
-            <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 8 }}>
-              <label>Tenant</label>
-              <input value={tenantId} onChange={(e) => setTenantId(e.target.value)} />
-              <label>Rep</label>
-              <input value={repId} onChange={(e) => setRepId(e.target.value)} />
-              <label>Session</label>
-              <input value={sessionId} onChange={(e) => setSessionId(e.target.value)} />
-            </div>
+        <>
+          {/* ─── Demo view: session + live audio side by side ─── */}
+          <div className="oa-grid">
+            {/* LEFT: Session controls + overlay */}
+            <div className="oa-card">
+              <h3 style={{ marginTop: 0 }}>Session</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "90px 1fr", gap: 8 }}>
+                <label>Tenant</label>
+                <input value={tenantId} onChange={(e) => setTenantId(e.target.value)} />
+                <label>Rep</label>
+                <input value={repId} onChange={(e) => setRepId(e.target.value)} />
+                <label>Session</label>
+                <input value={sessionId} readOnly style={{ opacity: 0.7 }} />
+              </div>
 
-            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-              <button onClick={() => connect()}>Start Session</button>
-              <button onClick={() => sendControl("request_reframe")}>Reframe</button>
-              <button onClick={() => sendControl("set_guidance_mode", "assist")}>Assist</button>
-              <button onClick={() => sendControl("set_guidance_mode", "auto")}>Auto</button>
-              <button
-                onClick={() => {
-                  setSessionId(newId("sess"));
-                  setTranscript([]);
-                  setOverlayState(DEFAULT_STATE);
-                }}
-              >
-                New Session ID
-              </button>
-              <div style={{ marginLeft: "auto", color: wsStatus === "ready" ? "green" : "#666" }}>
-                <span className={wsStatus === "ready" ? "oa-status-ready" : "oa-subtle"}>WS:</span> <b>{wsStatus}</b>
+              <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                {wsStatus !== "ready" ? (
+                  <button onClick={() => connect()}>▶ Start Session</button>
+                ) : (
+                  <button onClick={() => disconnect()}>⏹ End Session</button>
+                )}
+                <button onClick={() => sendControl("request_reframe")} disabled={wsStatus !== "ready"}>Reframe</button>
+                <button onClick={() => sendControl("set_guidance_mode", "assist")} disabled={wsStatus !== "ready"}>Assist</button>
+                <button onClick={() => sendControl("set_guidance_mode", "auto")} disabled={wsStatus !== "ready"}>Auto</button>
+                <button
+                  onClick={() => {
+                    disconnect();
+                    setSessionId(newId("sess"));
+                    setTranscript([]);
+                    setOverlayState(DEFAULT_STATE);
+                    setLastCorrection("");
+                    setAudioRunning(false);
+                  }}
+                >
+                  New Session
+                </button>
+              </div>
+
+              {lastCorrection ? (
+                <div className="oa-correction">
+                  <b>Coach correction:</b> {lastCorrection}
+                </div>
+              ) : null}
+
+              <h3 style={{ marginTop: 14 }}>Overlay preview</h3>
+              <OverlayPreview
+                state={overlayState}
+                onShown={onShown}
+                onApply={onApply}
+                onDismiss={onDismiss}
+                onMuteToggle={onMuteToggle}
+              />
+
+              <h3 style={{ marginTop: 14 }}>Inject transcript (manual)</h3>
+              <textarea
+                style={{ width: "100%", height: 70 }}
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                placeholder="Type what the buyer said…"
+              />
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button onClick={() => sendTranscript()}>Send</button>
+                <button onClick={() => sendLearning("helpful")} disabled={wsStatus !== "ready"}>👍 Helpful</button>
+                <button onClick={() => sendLearning("ignored")} disabled={wsStatus !== "ready"}>🤷 Ignored</button>
+              </div>
+
+              <h3 style={{ marginTop: 14 }}>Transcript stream</h3>
+              <div style={{ fontSize: 13, whiteSpace: "pre-wrap", maxHeight: 200, overflow: "auto" }}>
+                {transcript.length ? transcript.map((t, i) => <div key={i} style={{ marginBottom: 4 }}>{t}</div>) : <span className="oa-subtle">Session not started or no transcript yet.</span>}
               </div>
             </div>
 
-            <div style={{ marginTop: 8, fontSize: 12 }} className="oa-subtle">
-              Devices: {connectedDevices.map((d) => `${d.type}${d.name ? ` (${d.name})` : ""}`).join(", ") || "none"}
-            </div>
-            {lastCorrection ? (
-              <div className="oa-correction">
-                <b>Coach correction:</b> {lastCorrection}
-              </div>
-            ) : null}
-
-            <h3 style={{ marginTop: 14 }}>Inject transcript_final</h3>
-            <textarea
-              style={{ width: "100%", height: 90 }}
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder="Type a transcript_final block..."
-            />
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              <button onClick={() => sendTranscript()}>Send transcript_final</button>
-              <button onClick={() => sendLearning("helpful")}>Mark helpful</button>
-              <button onClick={() => sendLearning("ignored")}>Mark ignored</button>
-            </div>
-
-            <h3 style={{ marginTop: 14 }}>Transcript stream</h3>
-            <div style={{ fontSize: 13, color: "#333", whiteSpace: "pre-wrap" }}>
-              {transcript.length ? transcript.join("\n") : <span className="oa-subtle">No transcript yet.</span>}
-            </div>
-
-            <SetupPanel tenantId={tenantId} sessionId={sessionId} />
-          </div>
-
-          <div className="oa-card">
-            <h3>Overlay preview</h3>
-            <div style={{ fontSize: 12, marginBottom: 6 }} className="oa-subtle">
-              UI state: guidance.items = {overlayState.guidance.items.length} • text = {String((overlayState as any).text ?? "").slice(0, 60)}
-            </div>
-
-            <OverlayPreview
-              state={overlayState}
-              onShown={onShown}
-              onApply={onApply}
-              onDismiss={onDismiss}
-              onMuteToggle={onMuteToggle}
+            {/* RIGHT: Live audio + intelligence (inline) */}
+            <LiveAudioPanel
+              tenantId={tenantId}
+              repId={repId}
+              sessionId={sessionId}
+              timelinePush={latestTimelineEvent}
+              onAudioStateChange={setAudioRunning}
             />
           </div>
-        </div>
+        </>
       )}
     </div>
   );

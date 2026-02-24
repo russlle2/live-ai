@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-
-const API_KEY = (import.meta as any).env?.VITE_OVERLAY_API_KEY as string | undefined;
+import { API_BASE, API_KEY, apiHeaders } from "../lib/config";
 
 type Provider = "zoom" | "google";
 
@@ -34,15 +33,15 @@ export function SetupPanel(props: { tenantId: string; sessionId: string }) {
   const [privacy, setPrivacy] = useState<PrivacyControls>({ transcriptOptOut: false, encryptTranscriptFields: true, retentionDays: 30 });
   const [retentionStatus, setRetentionStatus] = useState<RetentionStatus | null>(null);
 
-  const headers = useMemo(() => ({ "Content-Type": "application/json", ...(API_KEY ? { "x-overlay-key": API_KEY } : {}) }), []);
+  const headers = useMemo(() => apiHeaders(), []);
 
   const loadStatuses = async () => {
     const providers: Provider[] = ["zoom", "google"];
     const next: Record<Provider, boolean> = { zoom: false, google: false };
 
     for (const provider of providers) {
-      const res = await fetch(`http://localhost:8080/api/integrations/oauth/status?tenantId=${encodeURIComponent(props.tenantId)}&provider=${provider}`, {
-        headers: API_KEY ? { "x-overlay-key": API_KEY } : {}
+      const res = await fetch(`${API_BASE}/api/integrations/oauth/status?tenantId=${encodeURIComponent(props.tenantId)}&provider=${provider}`, {
+        headers: apiHeaders()
       });
       const json = await res.json().catch(() => ({}));
       next[provider] = Boolean(json?.connected);
@@ -52,8 +51,8 @@ export function SetupPanel(props: { tenantId: string; sessionId: string }) {
   };
 
   const loadPrivacy = async () => {
-    const res = await fetch(`http://localhost:8080/api/privacy/controls?tenantId=${encodeURIComponent(props.tenantId)}`, {
-      headers: API_KEY ? { "x-overlay-key": API_KEY } : {}
+    const res = await fetch(`${API_BASE}/api/privacy/controls?tenantId=${encodeURIComponent(props.tenantId)}`, {
+      headers: apiHeaders()
     });
     const json = await res.json().catch(() => ({}));
     if (json?.controls) {
@@ -66,8 +65,8 @@ export function SetupPanel(props: { tenantId: string; sessionId: string }) {
   };
 
   const loadRetentionStatus = async () => {
-    const res = await fetch(`http://localhost:8080/api/privacy/retention-status?tenantId=${encodeURIComponent(props.tenantId)}`, {
-      headers: API_KEY ? { "x-overlay-key": API_KEY } : {}
+    const res = await fetch(`${API_BASE}/api/privacy/retention-status?tenantId=${encodeURIComponent(props.tenantId)}`, {
+      headers: apiHeaders()
     });
     const json = await res.json().catch(() => ({}));
     if (json?.ok && json?.scheduler) {
@@ -81,7 +80,7 @@ export function SetupPanel(props: { tenantId: string; sessionId: string }) {
 
     try {
       const redirectUri = `${window.location.origin}${window.location.pathname}?provider=${provider}`;
-      const res = await fetch("http://localhost:8080/api/integrations/oauth/start", {
+      const res = await fetch(`${API_BASE}/api/integrations/oauth/start`, {
         method: "POST",
         headers,
         body: JSON.stringify({ tenantId: props.tenantId, provider, redirectUri })
@@ -109,7 +108,7 @@ export function SetupPanel(props: { tenantId: string; sessionId: string }) {
     setMessage("");
     try {
       const redirectUri = `${window.location.origin}${window.location.pathname}?provider=${provider}`;
-      const res = await fetch("http://localhost:8080/api/integrations/oauth/callback", {
+      const res = await fetch(`${API_BASE}/api/integrations/oauth/callback`, {
         method: "POST",
         headers,
         body: JSON.stringify({ tenantId: props.tenantId, provider, code, state, redirectUri })
@@ -132,7 +131,7 @@ export function SetupPanel(props: { tenantId: string; sessionId: string }) {
     setBusy("privacy");
     setMessage("");
     try {
-      const res = await fetch("http://localhost:8080/api/privacy/controls", {
+      const res = await fetch(`${API_BASE}/api/privacy/controls`, {
         method: "POST",
         headers,
         body: JSON.stringify({ tenantId: props.tenantId, ...privacy })
@@ -148,7 +147,7 @@ export function SetupPanel(props: { tenantId: string; sessionId: string }) {
     setBusy("delete-session");
     setMessage("");
     try {
-      const res = await fetch("http://localhost:8080/api/privacy/delete-session", {
+      const res = await fetch(`${API_BASE}/api/privacy/delete-session`, {
         method: "POST",
         headers,
         body: JSON.stringify({ tenantId: props.tenantId, sessionId: props.sessionId })
@@ -164,7 +163,7 @@ export function SetupPanel(props: { tenantId: string; sessionId: string }) {
     setBusy("retention-run");
     setMessage("");
     try {
-      const res = await fetch("http://localhost:8080/api/privacy/prune-retention", {
+      const res = await fetch(`${API_BASE}/api/privacy/prune-retention`, {
         method: "POST",
         headers,
         body: JSON.stringify({ tenantId: props.tenantId })

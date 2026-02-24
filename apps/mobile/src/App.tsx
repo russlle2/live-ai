@@ -1,6 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { WsServerMessageV1, GuidanceControls } from "@overlay-assistant/shared";
 
+const SERVER_PORT = (import.meta as any).env?.VITE_SERVER_PORT || "8081";
+const API_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
+const WS_URL = `ws://${window.location.hostname}:${SERVER_PORT}/ws`;
+
 function newId(prefix: string) {
   return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now()}`;
 }
@@ -82,7 +86,7 @@ export function App() {
   const syncTimeline = async (forceHydrate = false) => {
     const sinceId = !forceHydrate && timelineCursor > 0 ? timelineCursor : 0;
     const res = await fetch(
-      `http://localhost:8080/api/conversation/timeline?tenantId=${encodeURIComponent(tenantId)}&sessionId=${encodeURIComponent(sessionId)}&limit=60${sinceId ? `&sinceId=${sinceId}` : ""}`,
+      `${API_BASE}/api/conversation/timeline?tenantId=${encodeURIComponent(tenantId)}&sessionId=${encodeURIComponent(sessionId)}&limit=60${sinceId ? `&sinceId=${sinceId}` : ""}`,
       { headers: apiKey ? { "x-overlay-key": apiKey } : {} }
     );
     const json = await res.json().catch(() => ({}));
@@ -121,15 +125,12 @@ export function App() {
     if (nextSinceId > timelineCursor) setTimelineCursor(nextSinceId);
   };
 
-  const wsUrl = useMemo(() => {
-    const host = window.location.hostname;
-    return `ws://${host}:8080/ws`;
-  }, []);
+  const wsUrl = WS_URL;
 
   const isBluetoothInput = (label: string) => /bluetooth|airpods|buds|headset|earbuds|hands-free/i.test(label || "");
 
   const sendAudioFrame = async (frameEnergy: number, partial?: string, final?: string) => {
-    const res = await fetch("http://localhost:8080/api/live/audio_frame", {
+    const res = await fetch(`${API_BASE}/api/live/audio_frame`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(apiKey ? { "x-overlay-key": apiKey } : {}) },
       body: JSON.stringify({
