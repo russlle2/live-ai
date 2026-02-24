@@ -45,6 +45,37 @@ type SessionCtx = {
   pendingCorrectionReason?: CoachCorrectionMetaV1["reason"];
   learning: { helpful: number; unhelpful: number; ignored: number };
   sttMockStarted?: boolean;
+  /** Live product context — set by the user per session */
+  productContext?: SessionProductContext;
+  /** History of guidance dashboard snapshots for the session */
+  guidanceHistory: GuidanceDashboardSnapshot[];
+};
+
+/** Product/service context the user provides per session */
+export type SessionProductContext = {
+  productName: string;
+  oneLiner: string;
+  valueProps: string[];
+  pricing: string;
+  commonObjections: Array<{ objection: string; response: string }>;
+  targetAudience: string;
+  competitors: string;
+  additionalNotes: string;
+};
+
+/** A snapshot of the multi-panel guidance dashboard */
+export type GuidanceDashboardSnapshot = {
+  timestamp: string;
+  primary: { text: string; title: string; confidence: number; confidenceBand: string } | null;
+  alternatives: Array<{ text: string; strategy: string }>;
+  stage: string;
+  momentum: { level: string; score: number };
+  buyerSentiment: { tone: string; engagement: string; urgency: string };
+  objectionsDetected: Array<{ key: string; score: number; suggestedResponse: string }>;
+  talkingPoints: string[];
+  riskAlerts: Array<{ type: string; message: string; severity: string }>;
+  dealScore: number;
+  nextMoves: string[];
 };
 
 const DEFAULT_CONTROLS: GuidanceControls = {
@@ -63,7 +94,7 @@ let lastRetentionPruneState: {
 
 const app = express();
 app.use(express.json({ limit: "256kb" }));
-app.use(cors({ origin: CONFIG.webOrigin, credentials: true }));
+app.use(cors({ origin: true, credentials: true }));
 app.use("/api", requireApiKeyForApiV1);
 
 app.get("/health", (_req, res) => res.json({ ok: true, arbitrationLocus: ARBITRATION_LOCUS }));
@@ -89,6 +120,9 @@ app.post("/api/demo/transcript_final", async (req, res) => {
       seq: 0,
       controls: CONFIG.defaultControls,
       memory: createSessionMemory(),
+      connectedDevices: new Map(),
+      learning: { helpful: 0, unhelpful: 0, ignored: 0 },
+      guidanceHistory: []
     } as any;
 
     sessions.set(session_id, ctx as any);
@@ -274,7 +308,8 @@ app.post("/api/live/audio_frame", async (req, res) => {
         controls: CONFIG.defaultControls,
         memory: createSessionMemory(),
         connectedDevices: new Map(),
-        learning: { helpful: 0, unhelpful: 0, ignored: 0 }
+        learning: { helpful: 0, unhelpful: 0, ignored: 0 },
+        guidanceHistory: []
       } as any;
       sessions.set(body.sessionId, ctx as any);
     }
@@ -340,6 +375,80 @@ app.post("/api/conversation/intel", async (req, res) => {
     data: { entityCount: intel.entities.length, momentCount: intel.moments.length, complianceRiskCount: intel.complianceRisks.length, confidence: intel.confidence }
   });
   return res.json({ ok: true, intelligence: intel });
+});
+
+// ─── Product Context (per-session) ───────────────────────────────────────────
+const ProductContextInput = z.object({
+  sessionId: z.string().min(1),
+  tenantId: z.string().min(1),
+  productName: z.string().max(200).default(""),
+  oneLiner: z.string().max(500).default(""),
+  valueProps: z.array(z.string().max(300)).max(20).default([]),
+  pricing: z.string().max(500).default(""),
+  commonObjections: z.array(z.object({ objection: z.string().max(300), response: z.string().max(500) })).max(20).default([]),
+  targetAudience: z.string().max(500).default(""),
+  competitors: z.string().max(500).default(""),
+  additionalNotes: z.string().max(2000).default("")
+});
+
+app.post("/api/session/product_context", async (req, res) => {
+  const parsed = ProductContextInput.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+  const body = parsed.data;
+
+  let ctx = sessions.get(body.sessionId) as any;
+  if (!ctx) {
+    ctx = {
+      tenantId: body.tenantId,
+      repId: "rep_demo",
+      sessionId: body.sessionId,
+      seq: 0,
+      controls: CONFIG.defaultControls,
+      memory: createSessionMemory(),
+      connectedDevices: new Map(),
+      learning: { helpful: 0, unhelpful: 0, ignored: 0 },
+      guidanceHistory: []
+    } as any;
+    sessions.set(body.sessionId, ctx as any);
+  }
+
+  ctx.productContext = {
+    productName: body.productName,
+    oneLiner: body.oneLiner,
+    valueProps: body.valueProps,
+    pricing: body.pricing,
+    commonObjections: body.commonObjections,
+    targetAudience: body.targetAudience,
+    competitors: body.competitors,
+    additionalNotes: body.additionalNotes
+  };
+
+  await emitLog({
+    tenantId: body.tenantId,
+    repId: "system",
+    session_id: body.sessionId,
+    service: "server",
+    eventType: "product_context_set",
+    data: { productName: body.productName, valuePropCount: body.valueProps.length, objectionCount: body.commonObjections.length }
+  });
+
+  return res.json({ ok: true });
+});
+
+app.get("/api/session/product_context", async (req, res) => {
+  const sessionId = String(req.query.sessionId ?? "");
+  if (!sessionId) return res.status(400).json({ ok: false, error: "sessionId_required" });
+  const ctx = sessions.get(sessionId) as any;
+  return res.json({ ok: true, productContext: ctx?.productContext ?? null });
+});
+
+app.get("/api/session/guidance_dashboard", async (req, res) => {
+  const sessionId = String(req.query.sessionId ?? "");
+  if (!sessionId) return res.status(400).json({ ok: false, error: "sessionId_required" });
+  const ctx = sessions.get(sessionId) as any;
+  const history = ctx?.guidanceHistory ?? [];
+  const latest = history.length > 0 ? history[history.length - 1] : null;
+  return res.json({ ok: true, latest, historyCount: history.length });
 });
 
 app.get("/api/conversation/timeline", async (req, res) => {
@@ -671,9 +780,9 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string) {
   // Safety: ensure memory exists (demo routes may call onTranscriptFinal without WS ctx init)
   if (!ctx.memory) ctx.memory = createSessionMemory();
 
-  // Throttle: no more than 1 suggestion per 3 seconds per session
+  // Throttle: no more than 1 suggestion per 800ms per session (fast enough for live coaching)
   const now = Date.now();
-  if (ctx.memory.lastSuggestionAt && now - ctx.memory.lastSuggestionAt < 3000) {
+  if (ctx.memory.lastSuggestionAt && now - ctx.memory.lastSuggestionAt < 800) {
     return;
   }
   ctx.memory.lastSuggestionAt = now;
@@ -808,6 +917,216 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string) {
 
   const overlayMsg: OverlayMessageV1 = { type: "patch", patch };
   broadcast(ctx.sessionId, { type: "overlay_message", session_id: ctx.sessionId, at: new Date().toISOString(), message: overlayMsg });
+
+  // ─── Generate multi-panel guidance dashboard ───────────────────────────
+  const dashboard = buildGuidanceDashboard(ctx, text, built, intel, patch);
+  if (!ctx.guidanceHistory) ctx.guidanceHistory = [];
+  ctx.guidanceHistory.push(dashboard);
+  if (ctx.guidanceHistory.length > 50) ctx.guidanceHistory = ctx.guidanceHistory.slice(-50);
+
+  broadcast(ctx.sessionId, {
+    type: "guidance_dashboard",
+    session_id: ctx.sessionId,
+    at: new Date().toISOString(),
+    dashboard: dashboard as unknown as Record<string, unknown>
+  });
+}
+
+/** Build a rich multi-panel guidance dashboard from coach result + context */
+function buildGuidanceDashboard(ctx: SessionCtx, text: string, built: any, intel: any, patch: any): GuidanceDashboardSnapshot {
+  const meta = (built as any)?.meta ?? {};
+  const pCtx = ctx.productContext;
+  const transcript = ctx.memory?.transcriptWindow ?? [];
+
+  // Primary suggestion
+  const primaryText = typeof patch?.text === "string" ? patch.text : (patch?.guidance?.items?.[0]?.text ?? "");
+  const primaryTitle = patch?.guidance?.items?.[0]?.title ?? "Next best line";
+  const primaryConf = patch?.guidance?.items?.[0]?.confidence ?? meta?.confidence ?? 0.5;
+  const primaryBand = patch?.guidance?.items?.[0]?.confidenceBand ?? meta?.confidenceBand ?? "medium";
+
+  // Stage
+  const stage = meta?.stage ?? "discovery";
+
+  // Momentum
+  const momentum = {
+    level: meta?.momentum?.level ?? "medium",
+    score: typeof meta?.momentum?.score === "number" ? meta.momentum.score : 50
+  };
+
+  // Buyer sentiment (infer from transcript + tone meta)
+  const toneRaw = meta?.tone ?? {};
+  const lastTexts = transcript.slice(-4).join(" ").toLowerCase();
+  const engagement = /\?|tell me|how|can you|show|explain/i.test(lastTexts) ? "high"
+    : /okay|sure|maybe|i guess/i.test(lastTexts) ? "medium" : "low";
+  const urgency = /today|asap|need|deadline|hurry|rush|fast|quick/i.test(lastTexts) ? "high"
+    : /soon|this week|next week|timeline/i.test(lastTexts) ? "medium" : "low";
+  const buyerSentiment = {
+    tone: toneRaw?.detected ?? (toneRaw?.style ?? "neutral"),
+    engagement,
+    urgency
+  };
+
+  // Objections detected (with suggested responses from product context)
+  const detectedObjections = (meta?.objectionsTop ?? []).map((obj: any) => {
+    const key = obj?.key ?? "unknown";
+    const score = obj?.score ?? 0;
+    // Try to find matching response from product context
+    let suggestedResponse = "";
+    if (pCtx?.commonObjections?.length) {
+      const match = pCtx.commonObjections.find(o => 
+        o.objection.toLowerCase().includes(key) || key.includes(o.objection.toLowerCase().split(" ")[0])
+      );
+      if (match) suggestedResponse = match.response;
+    }
+    if (!suggestedResponse) {
+      // Generic fallback
+      if (key === "price") suggestedResponse = "Reframe to ROI — what's the cost of NOT solving this?";
+      else if (key === "competitor") suggestedResponse = "Acknowledge their option, then highlight your unique differentiator.";
+      else if (key === "timeline") suggestedResponse = "Show a quick-start path — what's the smallest first step?";
+      else suggestedResponse = "Acknowledge the concern, ask what would make them comfortable.";
+    }
+    return { key, score, suggestedResponse };
+  });
+
+  // Alternative approaches (generate 2-3 based on stage/moment)
+  const alternatives = generateAlternativeApproaches(stage, meta?.moment ?? "unknown", text, pCtx);
+
+  // Talking points from product context
+  const talkingPoints: string[] = [];
+  if (pCtx?.productName) talkingPoints.push(`Product: ${pCtx.productName} — ${pCtx.oneLiner}`);
+  if (pCtx?.valueProps?.length) {
+    // Surface value props relevant to the current conversation
+    const relevant = pCtx.valueProps.filter(vp => {
+      const vpLower = vp.toLowerCase();
+      return lastTexts.split(/\s+/).some(w => w.length > 3 && vpLower.includes(w));
+    });
+    if (relevant.length) talkingPoints.push(...relevant.map(r => `✦ ${r}`));
+    else talkingPoints.push(...pCtx.valueProps.slice(0, 3).map(r => `✦ ${r}`));
+  }
+  if (pCtx?.pricing) talkingPoints.push(`Pricing: ${pCtx.pricing}`);
+  if (pCtx?.targetAudience) talkingPoints.push(`Target: ${pCtx.targetAudience}`);
+
+  // Risk alerts
+  const riskAlerts: Array<{ type: string; message: string; severity: string }> = [];
+  if (intel?.complianceRisks?.length) {
+    for (const risk of intel.complianceRisks) {
+      riskAlerts.push({ type: risk.type, message: risk.phrase || "Compliance pattern detected", severity: risk.severity });
+    }
+  }
+  if (buyerSentiment.engagement === "low" && transcript.length > 4) {
+    riskAlerts.push({ type: "engagement_drop", message: "Buyer engagement appears low — consider asking an open-ended question", severity: "medium" });
+  }
+  if (momentum.level === "low" && stage !== "discovery") {
+    riskAlerts.push({ type: "stalled_deal", message: "Momentum is low — consider suggesting a concrete next step", severity: "medium" });
+  }
+
+  // Deal score (0-100)
+  const dealScore = computeDealScore(stage, momentum, buyerSentiment, detectedObjections.length, transcript.length);
+
+  // Next moves (predictive)
+  const nextMoves = predictNextMoves(stage, meta?.moment, buyerSentiment, pCtx);
+
+  return {
+    timestamp: new Date().toISOString(),
+    primary: primaryText ? { text: primaryText, title: primaryTitle, confidence: primaryConf, confidenceBand: primaryBand } : null,
+    alternatives,
+    stage,
+    momentum,
+    buyerSentiment,
+    objectionsDetected: detectedObjections,
+    talkingPoints,
+    riskAlerts,
+    dealScore,
+    nextMoves
+  };
+}
+
+function generateAlternativeApproaches(stage: string, moment: string, text: string, pCtx?: SessionProductContext | null): Array<{ text: string; strategy: string }> {
+  const alts: Array<{ text: string; strategy: string }> = [];
+  const tNorm = text.toLowerCase();
+
+  if (moment === "price" || /price|cost|expensive|budget/i.test(tNorm)) {
+    alts.push({ strategy: "Value Reframe", text: "Instead of discussing price, redirect: 'What would solving this problem be worth to your team over the next year?'" });
+    alts.push({ strategy: "Anchor High", text: "Start with the premium option: 'Most teams in your situation go with [top tier] because...' — then the mid-tier feels like a deal." });
+    if (pCtx?.pricing) alts.push({ strategy: "Transparent Pricing", text: `Be direct: '${pCtx.pricing}. Want me to scope something that fits your budget specifically?'` });
+  } else if (moment === "competitor" || /competitor|alternative|other option|compared to/i.test(tNorm)) {
+    alts.push({ strategy: "Acknowledge & Differentiate", text: "Say: 'They're solid. The difference teams tell us is [unique value]. What matters most to you?'" });
+    alts.push({ strategy: "Win Story", text: "Share: 'A company like yours evaluated [competitor] and chose us because [reason]. Want the details?'" });
+  } else if (moment === "integration" || /\b(api|integrate|connect|sso|crm)\b/i.test(tNorm)) {
+    alts.push({ strategy: "Discovery First", text: "'What's your current stack? I'll map exactly which integrations apply and which don't — no guessing.'" });
+    alts.push({ strategy: "Proof Point", text: "'We have [X] live integrations. Most teams are live in under [time]. Want to see a sandbox?'" });
+  } else if (stage === "discovery") {
+    alts.push({ strategy: "Deep Discovery", text: "'What triggered you to look at this now? Understanding the 'why now' helps me skip the generic pitch.'" });
+    alts.push({ strategy: "Pain Mapping", text: "'On a scale of 1-10, how painful is this problem today? What would a 10 look like?'" });
+  } else if (stage === "evaluation") {
+    alts.push({ strategy: "Requirements Map", text: "'Let's build a quick requirements checklist — what are your top 3 must-haves?'" });
+    alts.push({ strategy: "Proof of Value", text: "'Would a 15-minute focused demo on your #1 use case be more valuable than a full walkthrough?'" });
+  } else if (stage === "negotiation" || stage === "closing") {
+    alts.push({ strategy: "Assumptive Close", text: "'Based on what you've told me, here's what I'd recommend. Should I send over the agreement?'" });
+    alts.push({ strategy: "Urgency Lever", text: "'If we get this moving by [date], I can [incentive]. What's your internal timeline?'" });
+  } else {
+    alts.push({ strategy: "Open-Ended Probe", text: "'Tell me more about that — what does success look like for you?'" });
+    alts.push({ strategy: "Empathy Bridge", text: "'I hear you. A lot of teams feel the same way at this stage. Here's what usually helps...'" });
+  }
+
+  return alts.slice(0, 3);
+}
+
+function computeDealScore(stage: string, momentum: { level: string; score: number }, sentiment: { engagement: string; urgency: string }, objectionCount: number, transcriptLen: number): number {
+  let score = 30; // base
+
+  // Stage bonus
+  if (stage === "evaluation") score += 15;
+  else if (stage === "negotiation") score += 30;
+  else if (stage === "closing") score += 45;
+
+  // Momentum
+  if (momentum.level === "high") score += 15;
+  else if (momentum.level === "medium") score += 8;
+
+  // Engagement
+  if (sentiment.engagement === "high") score += 10;
+  else if (sentiment.engagement === "low") score -= 10;
+
+  // Urgency
+  if (sentiment.urgency === "high") score += 10;
+  else if (sentiment.urgency === "medium") score += 5;
+
+  // Objections penalty (but not too harsh — objections mean engagement)
+  if (objectionCount >= 3) score -= 5;
+  else if (objectionCount >= 1) score += 2; // engaged enough to object
+
+  // Conversation depth bonus
+  if (transcriptLen >= 8) score += 5;
+
+  return Math.max(5, Math.min(95, score));
+}
+
+function predictNextMoves(stage: string, moment: string | undefined, sentiment: { engagement: string; urgency: string }, pCtx?: SessionProductContext | null): string[] {
+  const moves: string[] = [];
+
+  if (stage === "discovery") {
+    moves.push("Uncover the core pain point before pitching solutions");
+    moves.push("Ask: 'Who else is affected by this problem?'");
+    if (sentiment.engagement === "high") moves.push("Buyer is engaged — transition to showing relevant capabilities");
+  } else if (stage === "evaluation") {
+    moves.push("Connect your capabilities directly to their stated requirements");
+    if (sentiment.urgency === "high") moves.push("Urgency detected — propose a fast-track evaluation path");
+    moves.push("Offer a focused demo on their #1 pain point");
+  } else if (stage === "negotiation") {
+    moves.push("Identify all decision makers — 'Who besides you needs to sign off?'");
+    moves.push("Prepare mutual action plan with clear dates");
+    if (pCtx?.pricing) moves.push("Have pricing breakdown ready to share");
+  } else if (stage === "closing") {
+    moves.push("Summarize agreed value and ask for the commitment");
+    moves.push("Remove friction: 'What's the one thing that could slow this down?'");
+    moves.push("Propose a specific next step with a date");
+  }
+
+  if (moment === "price") moves.push("Have ROI calculation ready");
+  if (moment === "competitor") moves.push("Prepare differentiation talking points");
+
+  return moves.slice(0, 4);
 }
 
 function startSttMock(ctx: SessionCtx) {
@@ -870,7 +1189,8 @@ wss.on("connection", (ws) => {
         seq: 0,
         memory: createSessionMemory(),
         connectedDevices: new Map(),
-        learning: { helpful: 0, unhelpful: 0, ignored: 0 }
+        learning: { helpful: 0, unhelpful: 0, ignored: 0 },
+        guidanceHistory: []
       };
 
       if (ctx.tenantId !== tenantId || ctx.repId !== repId) {

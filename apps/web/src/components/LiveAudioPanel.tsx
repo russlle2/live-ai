@@ -44,6 +44,7 @@ export function LiveAudioPanel(props: {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const timerRef = useRef<number | null>(null);
   const speechRef = useRef<any>(null);
+  const runningRef = useRef(false);
   const seenEventIdsRef = useRef<Set<number>>(new Set());
   const [timelineCursor, setTimelineCursor] = useState(0);
 
@@ -181,6 +182,7 @@ export function LiveAudioPanel(props: {
   };
 
   const stop = () => {
+    runningRef.current = false;
     if (timerRef.current) {
       window.clearInterval(timerRef.current);
       timerRef.current = null;
@@ -247,6 +249,7 @@ export function LiveAudioPanel(props: {
       rec.lang = "en-US";
       rec.interimResults = true;
       rec.continuous = true;
+      rec.maxAlternatives = 1;
       rec.onresult = (event: any) => {
         let interim = "";
         let finalOut = "";
@@ -264,7 +267,32 @@ export function LiveAudioPanel(props: {
           sendFrame(energy, p || undefined, f).catch(() => undefined);
         }
       };
-      rec.onerror = () => setError("Speech recognition error. You can still use manual final lines.");
+      rec.onerror = (ev: any) => {
+        const code = ev?.error || "unknown";
+        // These errors are recoverable — auto-restart
+        if (code === "no-speech" || code === "aborted" || code === "network") {
+          if (runningRef.current) {
+            try { rec.stop(); } catch { /* ignore */ }
+            setTimeout(() => {
+              if (runningRef.current) {
+                try { rec.start(); } catch { /* ignore */ }
+              }
+            }, 300);
+          }
+          return;
+        }
+        setError(`Speech recognition error (${code}). You can still use manual final lines.`);
+      };
+      // Auto-restart: Chrome often fires onend even with continuous=true
+      rec.onend = () => {
+        if (runningRef.current) {
+          setTimeout(() => {
+            if (runningRef.current && speechRef.current) {
+              try { speechRef.current.start(); } catch { /* ignore */ }
+            }
+          }, 200);
+        }
+      };
       rec.start();
       speechRef.current = rec;
     } else {
@@ -272,6 +300,7 @@ export function LiveAudioPanel(props: {
     }
 
     setRunning(true);
+    runningRef.current = true;
     props.onAudioStateChange?.(true);
   };
 

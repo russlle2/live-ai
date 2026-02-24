@@ -49,4 +49,5 @@ export type WsServerMessageV1 =
     }
   | TranscriptFinalV1
   | { type: "overlay_message"; session_id: string; at: string; message: OverlayMessageV1 }
+  | { type: "guidance_dashboard"; session_id: string; at: string; dashboard: Record<string, unknown> }
   | { type: "error"; at: string; message: string; code: string; session_id?: string };

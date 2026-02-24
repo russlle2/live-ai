@@ -10,9 +10,9 @@ body {
 }
 
 .oa-web-shell {
-  max-width: 1120px;
+  max-width: 1440px;
   margin: 0 auto;
-  padding: 20px 16px 26px;
+  padding: 16px 14px 26px;
 }
 
 .oa-title {
@@ -112,6 +112,29 @@ select {
 
 @media (max-width: 920px) {
   .oa-grid {
+    grid-template-columns: 1fr;
+  }
+  .oa-command-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ─── 3-column command center grid ─── */
+.oa-command-grid {
+  display: grid;
+  grid-template-columns: 1fr 1.3fr 0.7fr;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+@media (max-width: 1200px) {
+  .oa-command-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .oa-command-grid {
     grid-template-columns: 1fr;
   }
 }
