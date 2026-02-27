@@ -33,6 +33,7 @@ export type TrustSummary = {
   day: string;
   patchReceived: number;
   patchRejected: number;
+  patchCoalesced: number;
   suggestionsShown: number;
   suggestionsApplied: number;
   suggestionsDismissed: number;
@@ -65,6 +66,7 @@ export async function getTrustSummaryForTenant(tenantId: string): Promise<TrustS
          (now() AT TIME ZONE 'utc')::date AS day,
          SUM(CASE WHEN event_type='patch_received' THEN 1 ELSE 0 END)::int AS patch_received,
          SUM(CASE WHEN event_type='patch_rejected' THEN 1 ELSE 0 END)::int AS patch_rejected,
+         SUM(CASE WHEN event_type='patch_coalesced' THEN 1 ELSE 0 END)::int AS patch_coalesced,
          SUM(CASE WHEN event_type='suggestion_shown' THEN 1 ELSE 0 END)::int AS suggestions_shown,
          SUM(CASE WHEN event_type='suggestion_applied' THEN 1 ELSE 0 END)::int AS suggestions_applied,
          SUM(CASE WHEN event_type='suggestion_dismissed' THEN 1 ELSE 0 END)::int AS suggestions_dismissed,
@@ -81,6 +83,7 @@ export async function getTrustSummaryForTenant(tenantId: string): Promise<TrustS
       day: String(r.day),
       patchReceived: Number(r.patch_received ?? 0),
       patchRejected: Number(r.patch_rejected ?? 0),
+      patchCoalesced: Number(r.patch_coalesced ?? 0),
       suggestionsShown: Number(r.suggestions_shown ?? 0),
       suggestionsApplied: Number(r.suggestions_applied ?? 0),
       suggestionsDismissed: Number(r.suggestions_dismissed ?? 0),

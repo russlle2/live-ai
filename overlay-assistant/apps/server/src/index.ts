@@ -18,6 +18,7 @@ import { emitLog } from "./obs/emitLog";
 import { arbitrateV1 } from "./arbitration/arbitration_v1";
 import { writeSalesforceNote } from "./integrations/salesforce_stub";
 import { writeHubspotNote } from "./integrations/hubspot_stub";
+import { withRetry } from "./integrations/retry";
 
 type Speaker = "rep" | "lead" | "unknown";
 
@@ -142,7 +143,8 @@ app.post("/api/integrations/write-note", async (req, res) => {
 
   const req0 = { tenantId: body.tenantId, integration: body.integration, idempotencyKey: body.idempotencyKey, payload: body.payload };
 
-  const result = body.integration === "salesforce" ? await writeSalesforceNote(req0) : await writeHubspotNote(req0);
+  const writeFn = body.integration === "salesforce" ? writeSalesforceNote : writeHubspotNote;
+  const result = await withRetry(writeFn, req0);
   return res.json({ ok: true, result });
 });
 
@@ -151,6 +153,32 @@ const wss = new WebSocketServer({ server, path: CONFIG.wsPath });
 
 const sessions = new Map<string, SessionCtx>();
 const socketsBySession = new Map<string, Set<any>>();
+
+/* ── Patch coalescer: prevent patch spam ───────────────────────── */
+const COALESCE_WINDOW_MS = 500;
+const pendingPatch = new Map<string, { timer: ReturnType<typeof setTimeout>; patch: any; at: string; ctx: SessionCtx }>();
+
+function coalescePatch(sessionId: string, ctx: SessionCtx, overlayMsg: OverlayMessageV1, at: string, bytes: number, latencyMs?: number) {
+  const existing = pendingPatch.get(sessionId);
+  if (existing) {
+    clearTimeout(existing.timer);
+    emitLog({
+      tenantId: ctx.tenantId, repId: ctx.repId, session_id: ctx.sessionId,
+      service: "server", eventType: "patch_coalesced",
+      data: { reason: "superseded_within_window" }
+    });
+  }
+  const timer = setTimeout(() => {
+    pendingPatch.delete(sessionId);
+    emitLog({
+      tenantId: ctx.tenantId, repId: ctx.repId, session_id: ctx.sessionId,
+      service: "server", eventType: "patch_received",
+      data: { bytes, latencyMs }
+    });
+    broadcast(sessionId, { type: "overlay_message", session_id: sessionId, at, message: overlayMsg });
+  }, COALESCE_WINDOW_MS);
+  pendingPatch.set(sessionId, { timer, patch: overlayMsg, at, ctx });
+}
 
 function safeJsonParse(s: string): any | null {
   try { return JSON.parse(s); } catch { return null; }
@@ -241,19 +269,9 @@ function onTranscriptFinal(ctx: SessionCtx, text: string) {
     return;
   }
 
-  // ── 5. Fire-and-forget: log success (non-blocking) ──
-  emitLog({
-    tenantId: ctx.tenantId,
-    repId: ctx.repId,
-    session_id: ctx.sessionId,
-    service: "server",
-    eventType: "patch_received",
-    data: { bytes: (s as any).bytes, latencyMs: decision.trace.latencyMs }
-  });
-
-  // ── 6. Broadcast guidance to client (synchronous) ──
+  // ── 5+6. Coalesce patch to prevent spam (trailing-edge debounce) ──
   const overlayMsg: OverlayMessageV1 = { type: "patch", patch: (s as any).patch };
-  broadcast(ctx.sessionId, { type: "overlay_message", session_id: ctx.sessionId, at: now, message: overlayMsg });
+  coalescePatch(ctx.sessionId, ctx, overlayMsg, now, (s as any).bytes, decision.trace.latencyMs);
 }
 
 function startSttMock(ctx: SessionCtx) {

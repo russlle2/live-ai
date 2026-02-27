@@ -6,7 +6,7 @@ import { TrustDashboard } from "./components/TrustDashboard";
 import { SoundWaveOrb } from "./components/SoundWaveOrb";
 import { ProfileManager } from "./components/ProfileManager";
 import type { ProductProfile } from "./components/ProfileManager";
-import { postUiEvent } from "./lib/api";
+import { postUiEvent, postCrmNote } from "./lib/api";
 import "./styles.css";
 
 type Speaker = "rep" | "lead" | "unknown";
@@ -46,6 +46,7 @@ export function App() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [activeProfile, setActiveProfile] = useState<ProductProfile | null>(null);
   const [orbMode, setOrbMode] = useState<OrbMode>("idle");
+  const [crmStatus, setCrmStatus] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const orbTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -343,7 +344,47 @@ export function App() {
 
       {/* ── Tab Content ────────────────────────────────────── */}
       {tab === "insights" ? (
-        <TrustDashboard tenantId={tenantId} httpBase={httpBase} />
+        <div>
+          <TrustDashboard tenantId={tenantId} httpBase={httpBase} />
+
+          {/* CRM Demo Panel */}
+          <div className="trust-panel" style={{ marginTop: 16 }}>
+            <div className="trust-score-hero" style={{ padding: "16px 20px" }}>
+              <div className="trust-score-label" style={{ fontWeight: 600, marginBottom: 12 }}>CRM Integration Demo</div>
+              <div style={{ display: "flex", gap: 12, justifyContent: "center", flexWrap: "wrap" }}>
+                {(["salesforce", "hubspot"] as const).map((crm) => (
+                  <button
+                    key={crm}
+                    className="btn-luxury btn-luxury--secondary btn-luxury--sm"
+                    onClick={async () => {
+                      setCrmStatus(`Writing to ${crm}…`);
+                      const res = await postCrmNote({
+                        tenantId,
+                        integration: crm,
+                        idempotencyKey: `demo_${crm}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+                        payload: { note: `Demo note from session ${sessionId}`, createdBy: repId }
+                      }, httpBase);
+                      setCrmStatus(
+                        res.ok
+                          ? `✓ ${crm} note created (${res.result?.externalId ?? "ok"})`
+                          : `✕ ${crm} write failed`
+                      );
+                      setTimeout(() => setCrmStatus(null), 5000);
+                    }}
+                  >
+                    Write {crm === "salesforce" ? "Salesforce" : "HubSpot"} Note
+                  </button>
+                ))}
+              </div>
+              {crmStatus && (
+                <div style={{ marginTop: 12, fontSize: 13, textAlign: "center", opacity: 0.8 }}>{crmStatus}</div>
+              )}
+              <div style={{ marginTop: 8, fontSize: 11, textAlign: "center", opacity: 0.4 }}>
+                Writes are idempotent with retry/backoff · Audit trail in crm_write_events table
+              </div>
+            </div>
+          </div>
+        </div>
       ) : (
         <div className="main-content">
           {/* ── Left Panel: Conversation ────────────────── */}

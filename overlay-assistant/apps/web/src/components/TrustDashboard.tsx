@@ -6,6 +6,7 @@ type TrustData = {
   trustScore: number;
   patchReceived: number;
   patchRejected: number;
+  patchCoalesced: number;
   suggestionsShown: number;
   suggestionsApplied: number;
   suggestionsDismissed: number;
@@ -71,8 +72,14 @@ export function TrustDashboard(props: { tenantId: string; httpBase?: string }) {
     { label: "Tips Skipped",  value: data.suggestionsDismissed, icon: "⏩" },
     { label: "Received",      value: data.patchReceived,       icon: "📥" },
     { label: "Errors",        value: data.patchRejected,       icon: "✕" },
+    { label: "Coalesced",     value: data.patchCoalesced,      icon: "🔗" },
     { label: "Paused",        value: data.muteOn,              icon: "⏸" },
   ];
+
+  const patchTotal = Math.max(1, data.patchReceived + data.patchRejected);
+  const rejectRate = ((data.patchRejected / patchTotal) * 100).toFixed(1);
+  const coalesceRate = data.patchReceived > 0
+    ? ((data.patchCoalesced / data.patchReceived) * 100).toFixed(1) : "0.0";
 
   return (
     <div className="trust-panel" role="region" aria-label="Performance insights">
@@ -97,6 +104,31 @@ export function TrustDashboard(props: { tenantId: string; httpBase?: string }) {
             <div className="trust-card-label">{m.label}</div>
           </div>
         ))}
+      </div>
+
+      {/* Patch Health Breakdown */}
+      <div className="trust-score-hero" style={{ marginTop: 16, padding: "16px 20px" }}>
+        <div className="trust-score-label" style={{ marginBottom: 8, fontWeight: 600 }}>Patch Health</div>
+        <div style={{ display: "flex", gap: 24, justifyContent: "center", flexWrap: "wrap" }}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 22, fontWeight: 700, color: Number(rejectRate) > 0.5 ? "#f87171" : "var(--color-text)" }}>{rejectRate}%</div>
+            <div style={{ fontSize: 12, opacity: 0.6 }}>Reject Rate</div>
+            <div style={{ fontSize: 10, opacity: 0.4 }}>target &lt; 0.5%</div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 22, fontWeight: 700, color: "var(--color-text)" }}>{coalesceRate}%</div>
+            <div style={{ fontSize: 12, opacity: 0.6 }}>Coalesced</div>
+            <div style={{ fontSize: 10, opacity: 0.4 }}>spam prevention</div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 22, fontWeight: 700, color: "var(--color-text)" }}>{data.patchReceived}</div>
+            <div style={{ fontSize: 12, opacity: 0.6 }}>Delivered</div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 22, fontWeight: 700, color: data.patchRejected > 0 ? "#f87171" : "var(--color-text)" }}>{data.patchRejected}</div>
+            <div style={{ fontSize: 12, opacity: 0.6 }}>Rejected</div>
+          </div>
+        </div>
       </div>
 
       <div style={{ textAlign: "center", marginTop: 32, fontSize: 13, color: "var(--color-text-dim)" }}>

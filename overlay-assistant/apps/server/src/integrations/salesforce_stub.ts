@@ -1,5 +1,6 @@
 import type { IntegrationWriteRequest, IntegrationWriteResult } from "./integration_interface";
 import { recordIdempotentWrite } from "./idempotency";
+import { emitLog } from "../obs/emitLog";
 
 export async function writeSalesforceNote(req: IntegrationWriteRequest): Promise<IntegrationWriteResult> {
   const res: IntegrationWriteResult = {
@@ -15,6 +16,19 @@ export async function writeSalesforceNote(req: IntegrationWriteRequest): Promise
     status: res.status,
     request: req,
     response: res
+  });
+
+  emitLog({
+    tenantId: req.tenantId,
+    repId: "",
+    service: "integration",
+    eventType: "integration_write_completed",
+    data: {
+      integration: "salesforce",
+      idempotencyKey: req.idempotencyKey,
+      status: res.status,
+      externalId: res.externalId
+    }
   });
 
   return res;
