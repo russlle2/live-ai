@@ -7,6 +7,7 @@ import { SoundWaveOrb } from "./components/SoundWaveOrb";
 import { ProfileManager } from "./components/ProfileManager";
 import type { ProductProfile } from "./components/ProfileManager";
 import { postUiEvent, postCrmNote } from "./lib/api";
+import { useSpeechRecognition } from "./lib/useSpeechRecognition";
 import "./styles.css";
 
 type Speaker = "rep" | "lead" | "unknown";
@@ -47,6 +48,8 @@ export function App() {
   const [activeProfile, setActiveProfile] = useState<ProductProfile | null>(null);
   const [orbMode, setOrbMode] = useState<OrbMode>("idle");
   const [crmStatus, setCrmStatus] = useState<string | null>(null);
+  const [aiMode, setAiMode] = useState<"ai" | "templates" | "unknown">("unknown");
+  const [micInterim, setMicInterim] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const orbTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -89,6 +92,18 @@ export function App() {
       setOrbMode(wsStatus === "ready" ? "listening" : "idle");
     }, durationMs);
   }, [wsStatus]);
+
+  /* ── Check AI status on mount ───────────────────────────────── */
+  useEffect(() => {
+    const checkAi = async () => {
+      try {
+        const res = await fetch(`${httpBase}/api/ai-status`);
+        const json = await res.json();
+        setAiMode(json.aiCoachEnabled ? "ai" : "templates");
+      } catch { setAiMode("templates"); }
+    };
+    checkAi();
+  }, [httpBase]);
 
   /* ── Patch application ──────────────────────────────────────── */
   const applyPatch = useCallback((patch: any) => {
@@ -180,14 +195,12 @@ export function App() {
   }, []);
 
   /* ── Send transcript ────────────────────────────────────────── */
-  const sendTranscript = useCallback(async () => {
-    const text = inputText.trim();
-    if (!text) return;
-    setInputText("");
-    setTranscript((t) => [...t, { text, speaker, at: new Date().toISOString() }]);
+  /* ── Core send function (used by both typing and mic) ───────── */
+  const sendText = useCallback(async (text: string, spk: Speaker) => {
+    if (!text.trim()) return;
+    setTranscript((t) => [...t, { text: text.trim(), speaker: spk, at: new Date().toISOString() }]);
     flashOrb("listening", 2000);
 
-    // Build product context from active profile (if any)
     const pc = activeProfile ? {
       productName: activeProfile.productName || undefined,
       differentiators: activeProfile.keyDifferentiators || undefined,
@@ -200,12 +213,36 @@ export function App() {
       await fetch(`${httpBase}/api/demo/transcript_final`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, text, speaker, productContext: pc }),
+        body: JSON.stringify({ session_id: sessionId, text: text.trim(), speaker: spk, productContext: pc }),
       });
     } catch {
       setError("Failed to send \u2014 check your connection");
     }
-  }, [inputText, speaker, sessionId, httpBase, flashOrb, activeProfile]);
+  }, [sessionId, httpBase, flashOrb, activeProfile]);
+
+  const sendTranscript = useCallback(async () => {
+    const text = inputText.trim();
+    if (!text) return;
+    setInputText("");
+    await sendText(text, speaker);
+  }, [inputText, speaker, sendText]);
+
+  /* ── Speech Recognition (browser mic) ───────────────────────── */
+  const speechCallbacks = useMemo(() => ({
+    onFinal: (text: string) => {
+      if (wsStatus === "ready" && text.trim()) {
+        setMicInterim("");
+        sendText(text, speaker);
+      }
+    },
+    onInterim: (text: string) => {
+      setMicInterim(text);
+    },
+    continuous: true,
+    lang: "en-US"
+  }), [wsStatus, speaker, sendText]);
+
+  const { isListening: micOn, isSupported: micSupported, toggle: toggleMic, interimText } = useSpeechRecognition(speechCallbacks);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -431,14 +468,34 @@ export function App() {
             </div>
 
             {/* Input Area */}
+            {/* Interim Speech Preview */}
+            {micOn && (interimText || micInterim) && (
+              <div className="mic-interim" aria-live="polite">
+                <span className="mic-interim-dot" />
+                {interimText || micInterim || "Listening…"}
+              </div>
+            )}
+
+            {/* Input Area */}
             <div className="input-area">
               <div className="input-row">
+                {micSupported && (
+                  <button
+                    className={`btn-mic ${micOn ? "btn-mic--active" : ""}`}
+                    onClick={toggleMic}
+                    disabled={wsStatus !== "ready"}
+                    title={micOn ? "Stop microphone" : "Start microphone"}
+                    aria-label={micOn ? "Stop microphone" : "Start microphone"}
+                  >
+                    {micOn ? "◼" : "🎤"}
+                  </button>
+                )}
                 <textarea
                   className="input-field"
                   value={inputText}
                   onChange={(e) => setInputText(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  placeholder="Type what's being said\u2026"
+                  placeholder={micOn ? "Mic is live — speak naturally…" : "Type what's being said…"}
                   aria-label="Enter what is being said in the conversation"
                   disabled={wsStatus !== "ready"}
                   rows={1}
@@ -451,7 +508,13 @@ export function App() {
                   Send
                 </button>
               </div>
-              <div className="input-hint">Press Enter to send · Shift+Enter for new line</div>
+              <div className="input-hint">
+                {micSupported
+                  ? (micOn ? "🔴 Mic active — speaking is auto-sent · You can also type" : "🎤 Click mic for hands-free · Enter to send text")
+                  : "Press Enter to send · Shift+Enter for new line"}
+                {aiMode === "ai" && <span style={{ float: "right", color: "#34d399" }}>● AI Coach Active</span>}
+                {aiMode === "templates" && <span style={{ float: "right", opacity: 0.5 }}>○ Template Mode</span>}
+              </div>
             </div>
           </div>
 

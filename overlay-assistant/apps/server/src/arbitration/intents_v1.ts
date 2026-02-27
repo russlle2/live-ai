@@ -4,7 +4,11 @@ export type IntentId =
   | "security_compliance_question"
   | "integration_question"
   | "competitor_comparison"
-  | "decision_process";
+  | "decision_process"
+  | "roi"
+  | "stakeholder"
+  | "pain_point"
+  | "trial";
 
 export type IntentScore = { intent: IntentId; matchScore: number; reasons: string[] };
 
@@ -18,7 +22,11 @@ const PATTERNS: Record<IntentId, RegExp[]> = {
   security_compliance_question: [/soc ?2|hipaa|gdpr|security|compliance|privacy|encryption|data protection|audit|penetration test/i],
   integration_question: [/integration|api|salesforce|hubspot|crm|slack|jira|sso|connect|plug.?in|sync|webhook|zapier/i],
   competitor_comparison: [/competitor|vs\.?|compare|already use|switch from|currently using|other option|alternative|looked at/i],
-  decision_process: [/procurement|legal|decision process|approve|sign|security review|stakeholder|who decides|sign.?off|next step/i]
+  decision_process: [/procurement|legal|decision process|approve|sign|security review|stakeholder|who decides|sign.?off|next step/i],
+  roi: [/roi|return on|pay for itself|value|business case|save time|save money|worth it|cost.?benefit|justify|payback/i],
+  stakeholder: [/boss|manager|team lead|cto|cfo|ceo|vp|director|executive|board|committee|leadership|my team|department/i],
+  pain_point: [/frustrat|struggle|painful|problem|challenge|difficult|broken|hate|slow|manual|tedious|waste time|bottleneck|headache/i],
+  trial: [/try|test|pilot|poc|proof of concept|demo|free|sample|hands.?on|sandbox|playground|trial/i]
 };
 
 export function scoreIntents(tNorm: string): IntentScore[] {

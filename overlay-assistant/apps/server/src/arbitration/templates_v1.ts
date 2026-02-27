@@ -85,12 +85,76 @@ export const TEMPLATE_RULES: TemplateRule[] = [
     priority: 65
   },
   {
+    id: "roi_1",
+    category: "intent:roi",
+    title: "Quantify the value",
+    text: "Say: \"Let me put some numbers on this \u2014 what does your team spend on this today in time and cost? I can model out the ROI so you have hard figures for the business case.\"",
+    reason: "They're weighing the value proposition",
+    priority: 68
+  },
+  {
+    id: "stakeholder_1",
+    category: "intent:stakeholder",
+    title: "Map the buying committee",
+    text: "Say: \"Who else on your team would be involved in this decision? I\u2019d love to tailor a quick overview for each stakeholder so everyone sees the value from their angle.\"",
+    reason: "They mentioned other people involved in the decision",
+    priority: 72
+  },
+  {
+    id: "pain_1",
+    category: "intent:pain_point",
+    title: "Dig into the pain",
+    text: "Say: \"How is that impacting your team day-to-day? If we could solve that, what would it free you up to focus on instead?\"",
+    reason: "They described a challenge or frustration",
+    priority: 74
+  },
+  {
+    id: "trial_1",
+    category: "intent:trial",
+    title: "Offer a proof of value",
+    text: "Say: \"Would it help to run a quick pilot? We can set you up in about 15 minutes and you\u2019d see real results within a week \u2014 no commitment.\"",
+    reason: "They seem interested but hesitant to commit",
+    priority: 62
+  },
+  {
     id: "fallback_1",
     category: "fallback",
-    title: "Keep the conversation going",
-    text: "Say: \"That\u2019s a great point \u2014 tell me more about that. What would the ideal solution look like for your team?\"",
-    reason: "General conversation \u2014 ask a thoughtful question",
+    title: "Uncover their top priority",
+    text: "Say: \"What\u2019s the single biggest thing you\u2019re trying to solve right now? I want to make sure we\u2019re focused on what matters most to you.\"",
+    reason: "Uncover their core priority",
     priority: 50
+  },
+  {
+    id: "fallback_2",
+    category: "fallback",
+    title: "Understand their timeline",
+    text: "Say: \"What\u2019s driving the timeline on this? Are you evaluating now or is there a deadline you\u2019re working toward?\"",
+    reason: "Understand their urgency and timeline",
+    priority: 49
+  },
+  {
+    id: "fallback_3",
+    category: "fallback",
+    title: "Connect to business impact",
+    text: "Say: \"How does this fit into what your team is focused on this quarter? I want to make sure we tie this back to your goals.\"",
+    reason: "Link the conversation to business outcomes",
+    priority: 48
+  },
+  {
+    id: "fallback_4",
+    category: "fallback",
+    title: "Ask about current process",
+    text: "Say: \"Walk me through how your team handles this today \u2014 what\u2019s working well and where do things break down?\"",
+    reason: "Understand their current workflow",
+    priority: 47
+  },
+  {
+    id: "fallback_5",
+    category: "fallback",
+    title: "Surface a success story",
+    text: "Say: \"We had a team in a similar situation \u2014 they cut their process time in half within the first month. Would it help to hear how they set things up?\"",
+    reason: "Build credibility with a relevant example",
+    priority: 46
   }
 ];
 

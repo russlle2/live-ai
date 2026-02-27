@@ -85,7 +85,13 @@ export function arbitrateV1(input: ArbitrationInput): ArbitrationDecision {
     const key = topObjection ? `objection:${topObjection}` : topIntent ? `intent:${topIntent}` : undefined;
 
     let rule = key ? TEMPLATE_RULES.find((r) => r.category === key) : undefined;
-    if (!rule) rule = TEMPLATE_RULES.find((r) => r.id === "fallback_1") ?? TEMPLATE_RULES.find((r) => r.id === "decision_1");
+    if (!rule) {
+      // Rotate through fallback templates to avoid repetition
+      const fallbacks = TEMPLATE_RULES.filter((r) => r.category === "fallback");
+      rule = fallbacks.length > 0
+        ? fallbacks[Date.now() % fallbacks.length]
+        : TEMPLATE_RULES.find((r) => r.id === "decision_1");
+    }
 
     const tq = transcriptQualityScore(t, input.domainKeywords);
     const matchScore = clamp01(objections[0]?.matchScore ?? intents[0]?.matchScore ?? 0.5);

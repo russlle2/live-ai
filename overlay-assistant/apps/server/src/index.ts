@@ -16,6 +16,7 @@ import { CONFIG, ARBITRATION_LOCUS } from "./config";
 import { upsertSession, endSession, getTrustSummaryForTenant } from "./db/queries";
 import { emitLog } from "./obs/emitLog";
 import { arbitrateV1 } from "./arbitration/arbitration_v1";
+import { getAiCoaching, isAiCoachEnabled } from "./arbitration/ai_coach_v1";
 import { writeSalesforceNote } from "./integrations/salesforce_stub";
 import { writeHubspotNote } from "./integrations/hubspot_stub";
 import { withRetry } from "./integrations/retry";
@@ -30,6 +31,8 @@ type ProductContext = {
   commonObjections?: string;
 };
 
+type ConversationTurn = { speaker: Speaker; text: string };
+
 type SessionCtx = {
   sessionId: string;
   tenantId: string;
@@ -39,6 +42,7 @@ type SessionCtx = {
   speaker: Speaker;
   lastActivity: number;
   productContext?: ProductContext;
+  conversationHistory: ConversationTurn[];
 };
 
 const DEFAULT_CONTROLS: GuidanceControls = {
@@ -197,19 +201,23 @@ function broadcast(sessionId: string, msg: WsServerMessageV1) {
 /**
  * onTranscriptFinal — the HOT PATH.
  *
- * ZERO awaits on the critical path:
- *   1. arbitrateV1() is synchronous (regex + template lookup, ≈0.1ms)
- *   2. sanitizePatch_v1() is synchronous (≈0.01ms)
- *   3. broadcast() is synchronous (ws.send is non-blocking)
- *   4. emitLog() is fire-and-forget (buffered, flushed every 50ms)
+ * When OPENAI_API_KEY is set:
+ *   → Uses GPT for contextual, specific coaching (async, ~200–800ms)
+ *   → Falls back to templates if API fails
  *
- * The SHA-256 hash is computed once inside arbitrateV1 and reused
- * from the decision trace — no duplicate hashing.
+ * When no API key:
+ *   → Uses regex + template matching (synchronous, <1ms)
  */
-function onTranscriptFinal(ctx: SessionCtx, text: string) {
+async function onTranscriptFinal(ctx: SessionCtx, text: string) {
   ctx.seq += 1;
   ctx.lastActivity = Date.now();
   const now = new Date().toISOString();
+
+  // ── Store in conversation history (keep last 20 turns) ──
+  ctx.conversationHistory.push({ speaker: ctx.speaker, text });
+  if (ctx.conversationHistory.length > 20) {
+    ctx.conversationHistory = ctx.conversationHistory.slice(-20);
+  }
 
   // ── 1. Build product-aware domain keywords ──
   const baseKeywords = ["security", "soc2", "crm", "integration"];
@@ -221,7 +229,7 @@ function onTranscriptFinal(ctx: SessionCtx, text: string) {
     if (pc.targetIndustry) baseKeywords.push(...pc.targetIndustry.toLowerCase().split(/[,;\s]+/).filter(Boolean).slice(0, 3));
   }
 
-  // ── 2. Run arbitration (synchronous, cached) ──
+  // ── 2. Run arbitration (sync template fallback always computed) ──
   const decision = arbitrateV1({
     text,
     controls: ctx.controls,
@@ -229,33 +237,56 @@ function onTranscriptFinal(ctx: SessionCtx, text: string) {
     speaker: ctx.speaker
   });
 
-  // Reuse the transcript hash from the arbitration trace (no double SHA-256)
   const transcriptHash = decision.trace.transcriptHash;
 
-  // ── 2. Fire-and-forget: log receipt (non-blocking) ──
+  // ── 3. Fire-and-forget: log receipt ──
   emitLog({
     tenantId: ctx.tenantId,
     repId: ctx.repId,
     session_id: ctx.sessionId,
     service: "server",
     eventType: "transcript_final_received",
-    data: { transcriptHash, transcriptLen: text.length, latencyMs: decision.trace.latencyMs, cacheHit: decision.trace.cacheHit }
+    data: { transcriptHash, transcriptLen: text.length, latencyMs: decision.trace.latencyMs, cacheHit: decision.trace.cacheHit, aiEnabled: isAiCoachEnabled() }
   });
 
-  // ── 3. Broadcast transcript back (synchronous) ──
+  // ── 4. Broadcast transcript back ──
   broadcast(ctx.sessionId, { type: "transcript_final", session_id: ctx.sessionId, seq: ctx.seq, at: now, text });
 
-  // ── 4. Build patch (synchronous) ──
-  const suggestionText = (decision.items?.[0]?.text ?? "").toString();
-  const rawPatch = {
-    text: suggestionText.length
-      ? suggestionText
-      : "Say: \"That\u2019s a great point \u2014 tell me more about that. What would the ideal solution look like for your team?\""
-  };
+  // ── 5. Get coaching — AI if available, else templates ──
+  let coachingText: string;
+  let aiGenerated = false;
+
+  if (isAiCoachEnabled()) {
+    const aiResult = await getAiCoaching({
+      currentText: text,
+      speaker: ctx.speaker,
+      conversationHistory: ctx.conversationHistory.slice(0, -1), // exclude current (already in prompt)
+      productContext: ctx.productContext,
+      tenantId: ctx.tenantId,
+      repId: ctx.repId,
+      sessionId: ctx.sessionId
+    });
+
+    if (aiResult) {
+      coachingText = aiResult.coaching;
+      aiGenerated = true;
+    } else {
+      // Fallback to templates
+      coachingText = (decision.items?.[0]?.text ?? "").toString();
+    }
+  } else {
+    coachingText = (decision.items?.[0]?.text ?? "").toString();
+  }
+
+  // Final fallback
+  if (!coachingText) {
+    coachingText = "Say: \"That\u2019s a great point \u2014 tell me more about that. What would the ideal solution look like for your team?\"";
+  }
+
+  const rawPatch = { text: coachingText };
 
   const s = sanitizePatch_v1(rawPatch);
   if (!s.ok) {
-    // Fire-and-forget: log rejection (non-blocking)
     emitLog({
       tenantId: ctx.tenantId,
       repId: ctx.repId,
@@ -269,7 +300,7 @@ function onTranscriptFinal(ctx: SessionCtx, text: string) {
     return;
   }
 
-  // ── 5+6. Coalesce patch to prevent spam (trailing-edge debounce) ──
+  // ── 6. Coalesce and send ──
   const overlayMsg: OverlayMessageV1 = { type: "patch", patch: (s as any).patch };
   coalescePatch(ctx.sessionId, ctx, overlayMsg, now, (s as any).bytes, decision.trace.latencyMs);
 }
@@ -305,7 +336,7 @@ wss.on("connection", (ws) => {
       const repId = String(raw.repId ?? "");
       if (!sessionId || !tenantId || !repId) return;
 
-      const ctx: SessionCtx = { sessionId, tenantId, repId, controls: { ...DEFAULT_CONTROLS }, seq: 0, speaker: "unknown", lastActivity: Date.now() };
+      const ctx: SessionCtx = { sessionId, tenantId, repId, controls: { ...DEFAULT_CONTROLS }, seq: 0, speaker: "unknown", lastActivity: Date.now(), conversationHistory: [] };
 
       sessions.set(sessionId, ctx);
       if (!socketsBySession.has(sessionId)) socketsBySession.set(sessionId, new Set());
@@ -371,7 +402,19 @@ app.get("/api/health/metrics", (_req, res) => {
     activeConnections,
     uptime: process.uptime(),
     memoryMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-    arbitrationLocus: ARBITRATION_LOCUS
+    arbitrationLocus: ARBITRATION_LOCUS,
+    aiCoachEnabled: isAiCoachEnabled(),
+    aiModel: CONFIG.openaiModel
+  });
+});
+
+/* ── AI status endpoint ────────────────────────────────────── */
+app.get("/api/ai-status", (_req, res) => {
+  res.json({
+    ok: true,
+    aiCoachEnabled: isAiCoachEnabled(),
+    model: isAiCoachEnabled() ? CONFIG.openaiModel : null,
+    mode: isAiCoachEnabled() ? "ai" : "templates"
   });
 });
 
