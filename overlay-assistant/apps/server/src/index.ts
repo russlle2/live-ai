@@ -20,6 +20,9 @@ import { getAiCoaching, isAiCoachEnabled } from "./arbitration/ai_coach_v1";
 import { writeSalesforceNote } from "./integrations/salesforce_stub";
 import { writeHubspotNote } from "./integrations/hubspot_stub";
 import { withRetry } from "./integrations/retry";
+import { requireAuth, signToken } from "./middleware/auth";
+import { rateLimitCoaching, clearSessionRateLimit, getRateLimitStats } from "./middleware/rate_limit";
+import { logTokenUsage, getTenantUsageSummary, getAllTenantUsage } from "./middleware/token_usage";
 
 type Speaker = "rep" | "lead" | "unknown";
 
@@ -71,7 +74,25 @@ const TranscriptFinalInput = z.object({
   }).optional()
 });
 
-app.post("/api/demo/transcript_final", async (req, res) => {
+/* ── Auth: login endpoint (returns JWT for SaaS users) ──────── */
+const LoginInput = z.object({
+  tenantId: z.string().min(1).max(100),
+  repId: z.string().min(1).max(100),
+  role: z.enum(["rep", "admin", "viewer"]).optional().default("rep")
+});
+
+app.post("/api/auth/login", (req, res) => {
+  const parsed = LoginInput.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+  if (!CONFIG.jwtSecret) {
+    // Demo mode — return a mock token indicator
+    return res.json({ ok: true, token: "demo-mode", mode: "demo", expiresIn: "8h" });
+  }
+  const token = signToken({ tenantId: parsed.data.tenantId, repId: parsed.data.repId, role: parsed.data.role });
+  return res.json({ ok: true, token, mode: "jwt", expiresIn: "8h" });
+});
+
+app.post("/api/demo/transcript_final", requireAuth, rateLimitCoaching, async (req, res) => {
   const parsed = TranscriptFinalInput.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
 
@@ -102,7 +123,7 @@ const UiEventInput = z.object({
   data: z.record(z.any()).optional()
 });
 
-app.post("/api/ui-event", async (req, res) => {
+app.post("/api/ui-event", requireAuth, async (req, res) => {
   const parsed = UiEventInput.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
 
@@ -140,7 +161,7 @@ const IntegrationInput = z.object({
   payload: z.record(z.any())
 });
 
-app.post("/api/integrations/write-note", async (req, res) => {
+app.post("/api/integrations/write-note", requireAuth, async (req, res) => {
   const parsed = IntegrationInput.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
   const body = parsed.data;
@@ -365,6 +386,7 @@ wss.on("connection", (ws) => {
       const sessionId = String(raw.session_id ?? "");
       sessions.delete(sessionId);
       socketsBySession.get(sessionId)?.delete(ws);
+      clearSessionRateLimit(sessionId);
       await endSession(sessionId);
       ws.close();
       return;
@@ -416,6 +438,24 @@ app.get("/api/ai-status", (_req, res) => {
     model: isAiCoachEnabled() ? CONFIG.openaiModel : null,
     mode: isAiCoachEnabled() ? "ai" : "templates"
   });
+});
+
+/* ── Token usage endpoint (per-tenant billing/audit) ──────── */
+app.get("/api/admin/usage", requireAuth, (req, res) => {
+  const tenantId = req.auth?.tenantId;
+  if (!tenantId) return res.status(400).json({ ok: false, error: "no_tenant" });
+
+  if (req.auth?.role === "admin" && req.query.all === "true") {
+    return res.json({ ok: true, usage: getAllTenantUsage() });
+  }
+
+  return res.json({ ok: true, usage: getTenantUsageSummary(tenantId) });
+});
+
+/* ── Rate limit stats (admin monitoring) ──────────────────── */
+app.get("/api/admin/rate-limits", requireAuth, (req, res) => {
+  if (req.auth?.role !== "admin") return res.status(403).json({ ok: false, error: "admin_only" });
+  return res.json({ ok: true, stats: getRateLimitStats() });
 });
 
 server.listen(CONFIG.port, () => {

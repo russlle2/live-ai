@@ -14,6 +14,7 @@
 import OpenAI from "openai";
 import { CONFIG } from "../config";
 import { emitLog } from "../obs/emitLog";
+import { logTokenUsage } from "../middleware/token_usage";
 
 let openai: OpenAI | null = null;
 
@@ -155,6 +156,21 @@ export async function getAiCoaching(req: CoachRequest): Promise<CoachResponse | 
         tokensUsed: response.usage?.total_tokens
       }
     });
+
+    // Log token usage for billing/auditing
+    if (response.usage) {
+      logTokenUsage({
+        tenantId: req.tenantId,
+        repId: req.repId,
+        sessionId: req.sessionId,
+        model: CONFIG.openaiModel,
+        promptTokens: response.usage.prompt_tokens,
+        completionTokens: response.usage.completion_tokens,
+        totalTokens: response.usage.total_tokens,
+        latencyMs,
+        cached: false
+      }).catch(() => {}); // fire-and-forget
+    }
 
     return {
       coaching: parsed.coaching || "Say: \"Tell me more about your specific situation — what's the biggest challenge you're facing right now?\"",

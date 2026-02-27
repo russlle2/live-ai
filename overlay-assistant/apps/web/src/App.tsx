@@ -8,6 +8,7 @@ import { ProfileManager } from "./components/ProfileManager";
 import type { ProductProfile } from "./components/ProfileManager";
 import { postUiEvent, postCrmNote } from "./lib/api";
 import { useSpeechRecognition } from "./lib/useSpeechRecognition";
+import { FaqPage } from "./components/FaqPage";
 import "./styles.css";
 
 type Speaker = "rep" | "lead" | "unknown";
@@ -50,6 +51,7 @@ export function App() {
   const [crmStatus, setCrmStatus] = useState<string | null>(null);
   const [aiMode, setAiMode] = useState<"ai" | "templates" | "unknown">("unknown");
   const [micInterim, setMicInterim] = useState("");
+  const [faqOpen, setFaqOpen] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const orbTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -348,6 +350,10 @@ export function App() {
             {statusLabel}
           </div>
 
+          <button className="btn-luxury btn-luxury--secondary btn-luxury--sm" onClick={() => setFaqOpen(true)}>
+            Help
+          </button>
+
           <button className="btn-luxury btn-luxury--secondary btn-luxury--sm" onClick={startNewSession}>
             New Session
           </button>
@@ -547,6 +553,9 @@ export function App() {
 
       {/* ── Profile Manager Modal ──────────────────────────── */}
       <ProfileManager isOpen={profileOpen} onClose={() => setProfileOpen(false)} onActiveProfileChange={setActiveProfile} />
+
+      {/* ── FAQ / Help Center ──────────────────────────────── */}
+      {faqOpen && <FaqPage onClose={() => setFaqOpen(false)} />}
     </div>
   );
 }
