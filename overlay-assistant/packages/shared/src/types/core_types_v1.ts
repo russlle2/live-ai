@@ -26,3 +26,12 @@ export type GuidanceItemV1 = {
   createdAt: string;
   explanation?: ExplanationV1;
 };
+
+/** Full overlay UI state (used by the web client) */
+export type OverlayStateV1 = {
+  guidance: { items: GuidanceItemV1[] };
+  settings: {
+    controls: GuidanceControls;
+    status?: { failureCode?: string };
+  };
+};

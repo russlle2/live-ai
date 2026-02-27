@@ -13,12 +13,12 @@ function clamp01(x: number): number {
 }
 
 const PATTERNS: Record<IntentId, RegExp[]> = {
-  scheduling: [/next week|calendar|schedule|book (a )?time|availability/i],
-  budget_discussion: [/budget|pricing|cost|too expensive|price/i],
-  security_compliance_question: [/soc ?2|hipaa|gdpr|security|compliance|privacy/i],
-  integration_question: [/integration|api|salesforce|hubspot|crm|slack|jira|sso/i],
-  competitor_comparison: [/competitor|vs\.?|compare|already use|switch from/i],
-  decision_process: [/procurement|legal|decision process|approve|sign|security review/i]
+  scheduling: [/next week|calendar|schedule|book (a )?time|availability|meeting|follow.?up|call back|when can|free time/i],
+  budget_discussion: [/budget|pricing|cost|too expensive|price|money|spend|afford|investment|roi|return/i],
+  security_compliance_question: [/soc ?2|hipaa|gdpr|security|compliance|privacy|encryption|data protection|audit|penetration test/i],
+  integration_question: [/integration|api|salesforce|hubspot|crm|slack|jira|sso|connect|plug.?in|sync|webhook|zapier/i],
+  competitor_comparison: [/competitor|vs\.?|compare|already use|switch from|currently using|other option|alternative|looked at/i],
+  decision_process: [/procurement|legal|decision process|approve|sign|security review|stakeholder|who decides|sign.?off|next step/i]
 };
 
 export function scoreIntents(tNorm: string): IntentScore[] {

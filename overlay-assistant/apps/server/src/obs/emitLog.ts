@@ -19,6 +19,44 @@ export type LogEnvelopeV1 = {
 
 const MAX_BYTES = 4096;
 
+/* ── Write buffer for fire-and-forget batching ────────────────────── */
+type PendingEvent = Parameters<typeof insertObsEvent>[0];
+let writeBuffer: PendingEvent[] = [];
+let flushScheduled = false;
+const FLUSH_INTERVAL_MS = 50;       // flush every 50ms — imperceptible delay
+const FLUSH_BATCH_MAX = 64;         // flush immediately if buffer hits this
+
+async function flushBuffer() {
+  flushScheduled = false;
+  if (writeBuffer.length === 0) return;
+  const batch = writeBuffer.splice(0, FLUSH_BATCH_MAX);
+  try {
+    await insertObsEventBatch(batch);
+  } catch {
+    // Telemetry should never crash the hot path
+  }
+  // If more items remain, schedule another flush
+  if (writeBuffer.length > 0) scheduleFlush();
+}
+
+function scheduleFlush() {
+  if (flushScheduled) return;
+  flushScheduled = true;
+  setTimeout(flushBuffer, FLUSH_INTERVAL_MS);
+}
+
+/** Batch-insert multiple obs events in one DB round trip */
+async function insertObsEventBatch(events: PendingEvent[]): Promise<void> {
+  if (events.length === 0) return;
+  if (events.length === 1) {
+    await insertObsEvent(events[0]);
+    return;
+  }
+  // For multiple events, still use insertObsEvent individually
+  // (a true VALUES-list batch can be added later for even more throughput)
+  await Promise.all(events.map((e) => insertObsEvent(e)));
+}
+
 function clampString(s: unknown, max = 200): string {
   const str = typeof s === "string" ? s : String(s ?? "");
   const noCtl = str.replace(/[\u0000-\u001F\u007F]/g, "");
@@ -49,7 +87,22 @@ function bytesLen(obj: any): number {
   }
 }
 
-export async function emitLog(base: Omit<LogEnvelopeV1, "schema" | "at" | "level" | "data"> & { level?: LogLevel; at?: string; data?: unknown }): Promise<void> {
+/**
+ * emitLog — **fire-and-forget by default**.
+ * Logs are buffered and flushed in batches every 50ms.
+ * The caller is never blocked by a DB write.
+ *
+ * Pass `{ blocking: true }` only when you need the write to complete
+ * before continuing (e.g. session_started where ordering matters).
+ */
+export function emitLog(
+  base: Omit<LogEnvelopeV1, "schema" | "at" | "level" | "data"> & {
+    level?: LogLevel;
+    at?: string;
+    data?: unknown;
+    blocking?: boolean;
+  }
+): void | Promise<void> {
   const env: LogEnvelopeV1 = {
     schema: "obs_log_v1",
     at: base.at ?? new Date().toISOString(),
@@ -69,10 +122,11 @@ export async function emitLog(base: Omit<LogEnvelopeV1, "schema" | "at" | "level
     env.data = { truncated: true, eventType: env.eventType };
   }
 
+  // stdout log (always synchronous, always fast)
   // eslint-disable-next-line no-console
   console.log(JSON.stringify(env));
 
-  await insertObsEvent({
+  const event: PendingEvent = {
     tenantId: env.tenantId,
     repId: env.repId,
     sessionId: env.session_id,
@@ -80,5 +134,17 @@ export async function emitLog(base: Omit<LogEnvelopeV1, "schema" | "at" | "level
     eventType: env.eventType,
     data: env.data,
     at: env.at
-  });
+  };
+
+  if (base.blocking) {
+    return insertObsEvent(event);
+  }
+
+  // Fire-and-forget: buffer the write
+  writeBuffer.push(event);
+  if (writeBuffer.length >= FLUSH_BATCH_MAX) {
+    flushBuffer();
+  } else {
+    scheduleFlush();
+  }
 }
