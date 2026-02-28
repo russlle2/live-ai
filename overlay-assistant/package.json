@@ -6,12 +6,14 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm run build -w packages/shared && concurrently -n shared,server,web -c auto \"npm run dev -w packages/shared\" \"npm run dev -w apps/server\" \"npm run dev -w apps/web\"",
-    "dev:server": "npm run dev -w apps/server",
-    "dev:web": "npm run dev -w apps/web",
-    "build": "npm run build -ws",
-    "test": "npm run test -ws",
-    "typecheck": "npm run typecheck -ws",
+    "dev": "pnpm -C packages/shared build && concurrently -n shared,server,web -c auto \"pnpm -C packages/shared dev\" \"pnpm -C apps/server dev\" \"pnpm -C apps/web dev\"",
+    "dev:server": "pnpm -C apps/server dev",
+    "dev:web": "pnpm -C apps/web dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "check": "pnpm lint && pnpm typecheck && pnpm test",
     "format": "prettier -w ."
   },
   "devDependencies": {

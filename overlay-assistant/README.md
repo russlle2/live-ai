@@ -29,19 +29,19 @@ cp .env.example .env
 ### 3) Install deps
 
 ```bash
-npm install
+pnpm install
 ```
 
 ### 4) Run DB migrations
 
 ```bash
-npm run db:migrate -w apps/server
+pnpm -C apps/server db:migrate
 ```
 
 ### 5) Run dev servers
 
 ```bash
-npm run dev
+pnpm dev
 ```
 
 - Web: http://localhost:5173
@@ -73,8 +73,8 @@ Replace the demo components with your real:
 
 ### Test
 ```bash
-npm run test
-npm run typecheck
+pnpm test
+pnpm typecheck
 ```
 
 ### Deploy

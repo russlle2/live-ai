@@ -87,6 +87,15 @@ export function ProfileManager({
     onActiveProfileChange(active);
   }, [activeId, profiles]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isOpen, onClose]);
+
   const addProfile = useCallback(() => {
     const p = newProfile();
     setProfiles((prev) => [...prev, p]);
@@ -128,7 +137,7 @@ export function ProfileManager({
 
   return (
     <div className="profile-overlay" onClick={onClose}>
-      <div className="profile-panel" onClick={(e) => e.stopPropagation()}>
+      <div className="profile-panel" role="dialog" aria-modal="true" aria-label="Product profiles" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="profile-panel-header">
           <div>

@@ -20,9 +20,10 @@ import { getAiCoaching, isAiCoachEnabled } from "./arbitration/ai_coach_v1";
 import { writeSalesforceNote } from "./integrations/salesforce_stub";
 import { writeHubspotNote } from "./integrations/hubspot_stub";
 import { withRetry } from "./integrations/retry";
-import { requireAuth, signToken } from "./middleware/auth";
-import { rateLimitCoaching, clearSessionRateLimit, getRateLimitStats } from "./middleware/rate_limit";
-import { logTokenUsage, getTenantUsageSummary, getAllTenantUsage } from "./middleware/token_usage";
+import { decodeAuthToken, requireAuth, signToken } from "./middleware/auth";
+import { rateLimitCoaching, clearSessionRateLimit, createRouteRateLimit, getRateLimitStats } from "./middleware/rate_limit";
+import { getTenantUsageSummary, getAllTenantUsage } from "./middleware/token_usage";
+import { applySecurityHeaders, requestContext } from "./middleware/security";
 
 type Speaker = "rep" | "lead" | "unknown";
 
@@ -56,8 +57,49 @@ const DEFAULT_CONTROLS: GuidanceControls = {
 };
 
 const app = express();
+app.disable("x-powered-by");
+if (CONFIG.trustProxy) app.set("trust proxy", 1);
+app.use(requestContext);
+app.use(applySecurityHeaders);
 app.use(express.json({ limit: "256kb" }));
 app.use(cors({ origin: CONFIG.webOrigin === "*" ? true : CONFIG.webOrigin, credentials: true }));
+
+const authRateLimit = createRouteRateLimit({
+  key: "auth_login",
+  max: 10,
+  windowMs: 60_000,
+  keySelector: (req) => req.ip ?? "unknown_ip"
+});
+
+const telemetryRateLimit = createRouteRateLimit({
+  key: "ui_event",
+  max: 120,
+  windowMs: 60_000,
+  keySelector: (req) => req.auth?.tenantId ?? req.ip ?? "unknown_ip"
+});
+
+function sendOk<T>(res: express.Response, payload?: T, status = 200) {
+  if (payload === undefined) return res.status(status).json({ ok: true });
+  return res.status(status).json({ ok: true, ...payload });
+}
+
+function sendErr(res: express.Response, status: number, error: string, message?: string, detail?: unknown) {
+  return res.status(status).json({ ok: false, error, message, detail });
+}
+
+function assertTenantAccess(req: express.Request, tenantId: string): boolean {
+  if (!req.auth) return false;
+  if (req.auth.role === "admin") return true;
+  return req.auth.tenantId === tenantId;
+}
+
+function asyncRoute<T extends express.Request>(
+  fn: (req: T, res: express.Response) => Promise<unknown>
+) {
+  return (req: T, res: express.Response, next: express.NextFunction) => {
+    Promise.resolve(fn(req, res)).catch(next);
+  };
+}
 
 app.get("/health", (_req, res) => res.json({ ok: true, arbitrationLocus: ARBITRATION_LOCUS }));
 
@@ -72,39 +114,42 @@ const TranscriptFinalInput = z.object({
     targetIndustry: z.string().max(200).optional(),
     commonObjections: z.string().max(2000).optional(),
   }).optional()
-});
+}).strict();
 
 /* ── Auth: login endpoint (returns JWT for SaaS users) ──────── */
 const LoginInput = z.object({
   tenantId: z.string().min(1).max(100),
   repId: z.string().min(1).max(100),
   role: z.enum(["rep", "admin", "viewer"]).optional().default("rep")
-});
+}).strict();
 
-app.post("/api/auth/login", (req, res) => {
+app.post("/api/auth/login", authRateLimit, (req, res) => {
   const parsed = LoginInput.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+  if (!parsed.success) return sendErr(res, 400, "validation_error", "Invalid login request", parsed.error.flatten());
   if (!CONFIG.jwtSecret) {
-    // Demo mode — return a mock token indicator
-    return res.json({ ok: true, token: "demo-mode", mode: "demo", expiresIn: "8h" });
+    if (process.env.NODE_ENV === "production" && !CONFIG.allowInsecureDemoAuth) {
+      return sendErr(res, 503, "auth_not_configured", "JWT auth must be configured in production");
+    }
+    return sendOk(res, { token: "demo-mode", mode: "demo", expiresIn: CONFIG.authTokenTtl });
   }
   const token = signToken({ tenantId: parsed.data.tenantId, repId: parsed.data.repId, role: parsed.data.role });
-  return res.json({ ok: true, token, mode: "jwt", expiresIn: "8h" });
+  return sendOk(res, { token, mode: "jwt", expiresIn: CONFIG.authTokenTtl });
 });
 
-app.post("/api/demo/transcript_final", requireAuth, rateLimitCoaching, async (req, res) => {
+app.post("/api/demo/transcript_final", requireAuth, rateLimitCoaching, asyncRoute(async (req, res) => {
   const parsed = TranscriptFinalInput.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+  if (!parsed.success) return sendErr(res, 400, "validation_error", "Invalid transcript payload", parsed.error.flatten());
 
   const { session_id, text, speaker, productContext } = parsed.data;
   const ctx = sessions.get(session_id);
-  if (!ctx) return res.status(404).json({ ok: false, error: "unknown_session" });
+  if (!ctx) return sendErr(res, 404, "unknown_session");
+  if (!assertTenantAccess(req, ctx.tenantId)) return sendErr(res, 403, "forbidden", "Tenant mismatch");
 
   ctx.speaker = speaker ?? ctx.speaker;
   if (productContext) ctx.productContext = productContext;
   onTranscriptFinal(ctx, text);
-  return res.json({ ok: true });
-});
+  return sendOk(res);
+}));
 
 const UiEventInput = z.object({
   tenantId: z.string().min(1),
@@ -121,18 +166,19 @@ const UiEventInput = z.object({
     "patch_rejected"
   ]),
   data: z.record(z.any()).optional()
-});
+}).strict();
 
-app.post("/api/ui-event", requireAuth, async (req, res) => {
+app.post("/api/ui-event", requireAuth, telemetryRateLimit, asyncRoute(async (req, res) => {
   const parsed = UiEventInput.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+  if (!parsed.success) return sendErr(res, 400, "validation_error", "Invalid UI event payload", parsed.error.flatten());
 
   const e = parsed.data;
+  if (!assertTenantAccess(req, e.tenantId)) return sendErr(res, 403, "forbidden", "Tenant mismatch");
 
   // Hard guard: block obvious transcript leakage fields
   const dataStr = JSON.stringify(e.data ?? {});
   if (/transcript|utterance|raw_text|full_text/i.test(dataStr)) {
-    return res.status(400).json({ ok: false, error: "ui_event_contains_disallowed_fields" });
+    return sendErr(res, 400, "ui_event_contains_disallowed_fields");
   }
 
   await emitLog({
@@ -144,34 +190,36 @@ app.post("/api/ui-event", requireAuth, async (req, res) => {
     data: e.data ?? {}
   });
 
-  return res.json({ ok: true });
-});
+  return sendOk(res);
+}));
 
-app.get("/api/trust/summary", async (req, res) => {
+app.get("/api/trust/summary", requireAuth, asyncRoute(async (req, res) => {
   const tenantId = String(req.query.tenantId ?? "");
-  if (!tenantId) return res.status(400).json({ ok: false, error: "tenantId_required" });
+  if (!tenantId) return sendErr(res, 400, "tenantId_required");
+  if (!assertTenantAccess(req, tenantId)) return sendErr(res, 403, "forbidden", "Tenant mismatch");
   const summary = await getTrustSummaryForTenant(tenantId);
-  return res.json({ ok: true, summary });
-});
+  return sendOk(res, { summary });
+}));
 
 const IntegrationInput = z.object({
   tenantId: z.string().min(1),
   integration: z.enum(["salesforce", "hubspot"]),
   idempotencyKey: z.string().min(8),
   payload: z.record(z.any())
-});
+}).strict();
 
-app.post("/api/integrations/write-note", requireAuth, async (req, res) => {
+app.post("/api/integrations/write-note", requireAuth, asyncRoute(async (req, res) => {
   const parsed = IntegrationInput.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+  if (!parsed.success) return sendErr(res, 400, "validation_error", "Invalid integration payload", parsed.error.flatten());
   const body = parsed.data;
+  if (!assertTenantAccess(req, body.tenantId)) return sendErr(res, 403, "forbidden", "Tenant mismatch");
 
   const req0 = { tenantId: body.tenantId, integration: body.integration, idempotencyKey: body.idempotencyKey, payload: body.payload };
 
   const writeFn = body.integration === "salesforce" ? writeSalesforceNote : writeHubspotNote;
   const result = await withRetry(writeFn, req0);
-  return res.json({ ok: true, result });
-});
+  return sendOk(res, { result });
+}));
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: CONFIG.wsPath });
@@ -355,7 +403,22 @@ wss.on("connection", (ws) => {
       const sessionId = String(raw.session_id ?? "");
       const tenantId = String(raw.tenantId ?? "");
       const repId = String(raw.repId ?? "");
+      const token = String(raw.token ?? "");
       if (!sessionId || !tenantId || !repId) return;
+
+      if (CONFIG.jwtSecret) {
+        if (!token) {
+          ws.send(JSON.stringify({ type: "error", at: new Date().toISOString(), message: "missing_auth_token", code: "missing_auth_token" } satisfies WsServerMessageV1));
+          ws.close();
+          return;
+        }
+        const payload = decodeAuthToken(token);
+        if (!payload || (payload.role !== "admin" && payload.tenantId !== tenantId)) {
+          ws.send(JSON.stringify({ type: "error", at: new Date().toISOString(), message: "invalid_auth_token", code: "invalid_auth_token" } satisfies WsServerMessageV1));
+          ws.close();
+          return;
+        }
+      }
 
       const ctx: SessionCtx = { sessionId, tenantId, repId, controls: { ...DEFAULT_CONTROLS }, seq: 0, speaker: "unknown", lastActivity: Date.now(), conversationHistory: [] };
 
@@ -418,8 +481,7 @@ wss.on("connection", (ws) => {
 app.get("/api/health/metrics", (_req, res) => {
   const activeSessions = sessions.size;
   const activeConnections = [...socketsBySession.values()].reduce((sum, s) => sum + s.size, 0);
-  res.json({
-    ok: true,
+  sendOk(res, {
     activeSessions,
     activeConnections,
     uptime: process.uptime(),
@@ -432,8 +494,7 @@ app.get("/api/health/metrics", (_req, res) => {
 
 /* ── AI status endpoint ────────────────────────────────────── */
 app.get("/api/ai-status", (_req, res) => {
-  res.json({
-    ok: true,
+  sendOk(res, {
     aiCoachEnabled: isAiCoachEnabled(),
     model: isAiCoachEnabled() ? CONFIG.openaiModel : null,
     mode: isAiCoachEnabled() ? "ai" : "templates"
@@ -443,19 +504,29 @@ app.get("/api/ai-status", (_req, res) => {
 /* ── Token usage endpoint (per-tenant billing/audit) ──────── */
 app.get("/api/admin/usage", requireAuth, (req, res) => {
   const tenantId = req.auth?.tenantId;
-  if (!tenantId) return res.status(400).json({ ok: false, error: "no_tenant" });
+  if (!tenantId) return sendErr(res, 400, "no_tenant");
 
-  if (req.auth?.role === "admin" && req.query.all === "true") {
-    return res.json({ ok: true, usage: getAllTenantUsage() });
+  if (req.query.all === "true") {
+    if (req.auth?.role !== "admin") return sendErr(res, 403, "admin_only");
+    return sendOk(res, { usage: getAllTenantUsage() });
   }
 
-  return res.json({ ok: true, usage: getTenantUsageSummary(tenantId) });
+  return sendOk(res, { usage: getTenantUsageSummary(tenantId) });
 });
 
 /* ── Rate limit stats (admin monitoring) ──────────────────── */
 app.get("/api/admin/rate-limits", requireAuth, (req, res) => {
-  if (req.auth?.role !== "admin") return res.status(403).json({ ok: false, error: "admin_only" });
-  return res.json({ ok: true, stats: getRateLimitStats() });
+  if (req.auth?.role !== "admin") return sendErr(res, 403, "admin_only");
+  return sendOk(res, { stats: getRateLimitStats() });
+});
+
+app.use((_req, res) => {
+  sendErr(res, 404, "not_found");
+});
+
+app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  const message = err instanceof Error ? err.message : "unknown_error";
+  return sendErr(res, 500, "internal_error", process.env.NODE_ENV === "development" ? message : undefined);
 });
 
 server.listen(CONFIG.port, () => {

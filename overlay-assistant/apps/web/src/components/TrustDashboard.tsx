@@ -20,7 +20,7 @@ function scoreGradient(score: number): string {
   return "trust-score-number--bad";
 }
 
-export function TrustDashboard(props: { tenantId: string; httpBase?: string }) {
+export function TrustDashboard(props: { tenantId: string; httpBase?: string; token?: string | null }) {
   const [data, setData] = useState<TrustData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -30,7 +30,15 @@ export function TrustDashboard(props: { tenantId: string; httpBase?: string }) {
     let cancelled = false;
     const fetchData = async () => {
       try {
-        const res = await fetch(`${base}/api/trust/summary?tenantId=${encodeURIComponent(props.tenantId)}`);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 6000);
+        const headers: Record<string, string> = {};
+        if (props.token) headers.Authorization = `Bearer ${props.token}`;
+        const res = await fetch(`${base}/api/trust/summary?tenantId=${encodeURIComponent(props.tenantId)}`, {
+          headers,
+          signal: controller.signal
+        });
+        clearTimeout(timeout);
         if (!res.ok) throw new Error(`Server returned ${res.status}`);
         const json = await res.json();
         if (!cancelled) { setData(json.summary); setError(null); setLoading(false); }
@@ -41,7 +49,7 @@ export function TrustDashboard(props: { tenantId: string; httpBase?: string }) {
     fetchData();
     const t = setInterval(fetchData, 5000);
     return () => { cancelled = true; clearInterval(t); };
-  }, [props.tenantId, base]);
+  }, [props.tenantId, props.token, base]);
 
   if (loading) {
     return (
@@ -111,7 +119,7 @@ export function TrustDashboard(props: { tenantId: string; httpBase?: string }) {
         <div className="trust-score-label" style={{ marginBottom: 8, fontWeight: 600 }}>Patch Health</div>
         <div style={{ display: "flex", gap: 24, justifyContent: "center", flexWrap: "wrap" }}>
           <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 22, fontWeight: 700, color: Number(rejectRate) > 0.5 ? "#f87171" : "var(--color-text)" }}>{rejectRate}%</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: Number(rejectRate) > 0.5 ? "var(--color-danger)" : "var(--color-text)" }}>{rejectRate}%</div>
             <div style={{ fontSize: 12, opacity: 0.6 }}>Reject Rate</div>
             <div style={{ fontSize: 10, opacity: 0.4 }}>target &lt; 0.5%</div>
           </div>
@@ -125,7 +133,7 @@ export function TrustDashboard(props: { tenantId: string; httpBase?: string }) {
             <div style={{ fontSize: 12, opacity: 0.6 }}>Delivered</div>
           </div>
           <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 22, fontWeight: 700, color: data.patchRejected > 0 ? "#f87171" : "var(--color-text)" }}>{data.patchRejected}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: data.patchRejected > 0 ? "var(--color-danger)" : "var(--color-text)" }}>{data.patchRejected}</div>
             <div style={{ fontSize: 12, opacity: 0.6 }}>Rejected</div>
           </div>
         </div>

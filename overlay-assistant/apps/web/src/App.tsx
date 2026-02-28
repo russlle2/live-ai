@@ -1,15 +1,16 @@
-import React, { useMemo, useState, useCallback, useRef, useEffect } from "react";
+import React, { Suspense, lazy, useMemo, useState, useCallback, useRef, useEffect } from "react";
 import type { OverlayMessageV1, OverlayStateV1, WsServerMessageV1 } from "@overlay-assistant/shared";
 import { sanitizePatch_v1 } from "@overlay-assistant/shared";
 import { OverlayPreview } from "./components/OverlayPreview";
-import { TrustDashboard } from "./components/TrustDashboard";
 import { SoundWaveOrb } from "./components/SoundWaveOrb";
-import { ProfileManager } from "./components/ProfileManager";
 import type { ProductProfile } from "./components/ProfileManager";
-import { postUiEvent, postCrmNote } from "./lib/api";
+import { login, postUiEvent, postCrmNote } from "./lib/api";
 import { useSpeechRecognition } from "./lib/useSpeechRecognition";
-import { FaqPage } from "./components/FaqPage";
 import "./styles.css";
+
+const TrustDashboard = lazy(() => import("./components/TrustDashboard").then((m) => ({ default: m.TrustDashboard })));
+const ProfileManager = lazy(() => import("./components/ProfileManager").then((m) => ({ default: m.ProfileManager })));
+const FaqPage = lazy(() => import("./components/FaqPage").then((m) => ({ default: m.FaqPage })));
 
 type Speaker = "rep" | "lead" | "unknown";
 type ConnectionStatus = "disconnected" | "connecting" | "ready";
@@ -52,11 +53,17 @@ export function App() {
   const [aiMode, setAiMode] = useState<"ai" | "templates" | "unknown">("unknown");
   const [micInterim, setMicInterim] = useState("");
   const [faqOpen, setFaqOpen] = useState(false);
+  const [authToken, setAuthToken] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const authTokenRef = useRef<string | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const orbTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasConnected = useRef(false);
   const transcriptEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    authTokenRef.current = authToken;
+  }, [authToken]);
 
   /* ── Auto-scroll transcript ─────────────────────────────────── */
   useEffect(() => {
@@ -85,6 +92,14 @@ export function App() {
     const wsproto = loc.protocol === "https:" ? "wss" : "ws";
     return { wsUrl: `${wsproto}://${host}:8080/ws`, httpBase: `${proto}://${host}:8080` };
   }, []);
+
+  const ensureAuth = useCallback(async () => {
+    if (authTokenRef.current) return authTokenRef.current;
+    const result = await login({ tenantId, repId, role: "admin" }, httpBase);
+    authTokenRef.current = result.token;
+    setAuthToken(result.token);
+    return result.token;
+  }, [tenantId, repId, httpBase]);
 
   /* ── Orb animation trigger ──────────────────────────────────── */
   const flashOrb = useCallback((mode: OrbMode, durationMs = 3000) => {
@@ -129,12 +144,12 @@ export function App() {
         flashOrb("speaking", 4000);
         const res = sanitizePatch_v1((m as any).patch);
         if (!res.ok) {
-          postUiEvent({ tenantId, repId, sessionId, eventType: "patch_rejected", data: { reason: (res as any).reason, bytes: (res as any).bytes } }, httpBase);
+          postUiEvent({ tenantId, repId, sessionId, eventType: "patch_rejected", data: { reason: (res as any).reason, bytes: (res as any).bytes } }, httpBase, authTokenRef.current);
           const raw = (m as any).patch;
           if (raw && typeof raw === "object" && typeof raw.text === "string") applyPatch({ text: raw.text });
           return;
         }
-        postUiEvent({ tenantId, repId, sessionId, eventType: "patch_received", data: { bytes: (res as any).bytes } }, httpBase);
+        postUiEvent({ tenantId, repId, sessionId, eventType: "patch_received", data: { bytes: (res as any).bytes } }, httpBase, authTokenRef.current);
         applyPatch((res as any).patch);
       }
     },
@@ -147,12 +162,12 @@ export function App() {
     setError(null);
     setWsStatus("connecting");
 
-    try {
+    ensureAuth().then((token) => {
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        ws.send(JSON.stringify({ type: "start", session_id: sessionId, tenantId, repId }));
+        ws.send(JSON.stringify({ type: "start", session_id: sessionId, tenantId, repId, token }));
       };
 
       ws.onmessage = async (ev) => {
@@ -181,11 +196,11 @@ export function App() {
       ws.onerror = () => {
         setError(hasConnected.current ? "Connection lost. Reconnecting\u2026" : "Could not reach the server. Check that it\u2019s running and try again.");
       };
-    } catch {
-      setError("Could not connect to server. Is it running?");
+    }).catch(() => {
+      setError("Authentication failed. Check tenant/rep identity and server configuration.");
       setWsStatus("disconnected");
-    }
-  }, [wsUrl, sessionId, tenantId, repId, handleOverlayMessage, flashOrb]);
+    });
+  }, [wsUrl, sessionId, tenantId, repId, handleOverlayMessage, flashOrb, ensureAuth]);
 
   /* ── Cleanup on unmount ─────────────────────────────────────── */
   useEffect(() => {
@@ -212,15 +227,20 @@ export function App() {
     } : undefined;
 
     try {
-      await fetch(`${httpBase}/api/demo/transcript_final`, {
+      const token = await ensureAuth();
+      const res = await fetch(`${httpBase}/api/demo/transcript_final`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({ session_id: sessionId, text: text.trim(), speaker: spk, productContext: pc }),
       });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error((json as any)?.message || (json as any)?.error || "send_failed");
+      }
     } catch {
       setError("Failed to send \u2014 check your connection");
     }
-  }, [sessionId, httpBase, flashOrb, activeProfile]);
+  }, [sessionId, httpBase, flashOrb, activeProfile, ensureAuth]);
 
   const sendTranscript = useCallback(async () => {
     const text = inputText.trim();
@@ -246,6 +266,12 @@ export function App() {
 
   const { isListening: micOn, isSupported: micSupported, toggle: toggleMic, interimText } = useSpeechRecognition(speechCallbacks);
 
+  useEffect(() => {
+    if (tab === "insights") {
+      ensureAuth().catch(() => undefined);
+    }
+  }, [tab, ensureAuth]);
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendTranscript(); }
@@ -254,17 +280,17 @@ export function App() {
   );
 
   /* ── Telemetry callbacks ────────────────────────────────────── */
-  const onShown = async (itemId: string) => { postUiEvent({ tenantId, repId, sessionId, eventType: "suggestion_shown", data: { itemId } }, httpBase); };
-  const onApply = async (itemId: string) => { postUiEvent({ tenantId, repId, sessionId, eventType: "suggestion_applied", data: { itemId } }, httpBase); };
+  const onShown = async (itemId: string) => { postUiEvent({ tenantId, repId, sessionId, eventType: "suggestion_shown", data: { itemId } }, httpBase, authTokenRef.current); };
+  const onApply = async (itemId: string) => { postUiEvent({ tenantId, repId, sessionId, eventType: "suggestion_applied", data: { itemId } }, httpBase, authTokenRef.current); };
   const onDismiss = async (itemId: string) => {
-    postUiEvent({ tenantId, repId, sessionId, eventType: "suggestion_dismissed", data: { itemId } }, httpBase);
+    postUiEvent({ tenantId, repId, sessionId, eventType: "suggestion_dismissed", data: { itemId } }, httpBase, authTokenRef.current);
     setOverlayState((s) => ({ ...s, guidance: { ...s.guidance, items: s.guidance.items.filter((x) => x.id !== itemId) } }));
     setOverlayState((s: any) => ({ ...s, text: "" }));
   };
   const onMuteToggle = async () => {
     const muted = !overlayState.settings.controls.guidanceMuted;
     setOverlayState((s) => ({ ...s, settings: { ...s.settings, controls: { ...s.settings.controls, guidanceMuted: muted } } }));
-    postUiEvent({ tenantId, repId, sessionId, eventType: muted ? "mute_on" : "mute_off", data: {} }, httpBase);
+    postUiEvent({ tenantId, repId, sessionId, eventType: muted ? "mute_on" : "mute_off", data: {} }, httpBase, authTokenRef.current);
   };
 
   const startNewSession = () => {
@@ -315,7 +341,9 @@ export function App() {
             Set up a Product Profile first
           </button>
         </div>
-        <ProfileManager isOpen={profileOpen} onClose={() => setProfileOpen(false)} onActiveProfileChange={setActiveProfile} />
+        <Suspense fallback={null}>
+          <ProfileManager isOpen={profileOpen} onClose={() => setProfileOpen(false)} onActiveProfileChange={setActiveProfile} />
+        </Suspense>
       </div>
     );
   }
@@ -377,18 +405,20 @@ export function App() {
 
       {/* ── Nav Tabs ───────────────────────────────────────── */}
       <nav className="nav-tabs" role="tablist" aria-label="Main navigation">
-        <button role="tab" aria-selected={tab === "session"} className={`nav-tab ${tab === "session" ? "nav-tab--active" : ""}`} onClick={() => setTab("session")}>
+        <button id="tab-session" role="tab" aria-selected={tab === "session"} aria-controls="panel-session" className={`nav-tab ${tab === "session" ? "nav-tab--active" : ""}`} onClick={() => setTab("session")}>
           Live Session
         </button>
-        <button role="tab" aria-selected={tab === "insights"} className={`nav-tab ${tab === "insights" ? "nav-tab--active" : ""}`} onClick={() => setTab("insights")}>
+        <button id="tab-insights" role="tab" aria-selected={tab === "insights"} aria-controls="panel-insights" className={`nav-tab ${tab === "insights" ? "nav-tab--active" : ""}`} onClick={() => setTab("insights")}>
           Insights
         </button>
       </nav>
 
       {/* ── Tab Content ────────────────────────────────────── */}
       {tab === "insights" ? (
-        <div>
-          <TrustDashboard tenantId={tenantId} httpBase={httpBase} />
+        <section id="panel-insights" role="tabpanel" aria-labelledby="tab-insights">
+          <Suspense fallback={<div className="transcript-empty">Loading insights…</div>}>
+            <TrustDashboard tenantId={tenantId} httpBase={httpBase} token={authToken} />
+          </Suspense>
 
           {/* CRM Demo Panel */}
           <div className="trust-panel" style={{ marginTop: 16 }}>
@@ -401,12 +431,13 @@ export function App() {
                     className="btn-luxury btn-luxury--secondary btn-luxury--sm"
                     onClick={async () => {
                       setCrmStatus(`Writing to ${crm}…`);
+                      const token = await ensureAuth();
                       const res = await postCrmNote({
                         tenantId,
                         integration: crm,
                         idempotencyKey: `demo_${crm}_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
                         payload: { note: `Demo note from session ${sessionId}`, createdBy: repId }
-                      }, httpBase);
+                      }, httpBase, token);
                       setCrmStatus(
                         res.ok
                           ? `✓ ${crm} note created (${res.result?.externalId ?? "ok"})`
@@ -427,9 +458,9 @@ export function App() {
               </div>
             </div>
           </div>
-        </div>
+        </section>
       ) : (
-        <div className="main-content">
+        <section id="panel-session" className="main-content" role="tabpanel" aria-labelledby="tab-session">
           {/* ── Left Panel: Conversation ────────────────── */}
           <div className="panel panel--left">
             <div className="panel-header">
@@ -518,7 +549,7 @@ export function App() {
                 {micSupported
                   ? (micOn ? "🔴 Mic active — speaking is auto-sent · You can also type" : "🎤 Click mic for hands-free · Enter to send text")
                   : "Press Enter to send · Shift+Enter for new line"}
-                {aiMode === "ai" && <span style={{ float: "right", color: "#34d399" }}>● AI Coach Active</span>}
+                {aiMode === "ai" && <span style={{ float: "right", color: "var(--color-success)" }}>● AI Coach Active</span>}
                 {aiMode === "templates" && <span style={{ float: "right", opacity: 0.5 }}>○ Template Mode</span>}
               </div>
             </div>
@@ -548,14 +579,20 @@ export function App() {
               />
             </div>
           </div>
-        </div>
+        </section>
       )}
 
       {/* ── Profile Manager Modal ──────────────────────────── */}
-      <ProfileManager isOpen={profileOpen} onClose={() => setProfileOpen(false)} onActiveProfileChange={setActiveProfile} />
+      <Suspense fallback={null}>
+        <ProfileManager isOpen={profileOpen} onClose={() => setProfileOpen(false)} onActiveProfileChange={setActiveProfile} />
+      </Suspense>
 
       {/* ── FAQ / Help Center ──────────────────────────────── */}
-      {faqOpen && <FaqPage onClose={() => setFaqOpen(false)} />}
+      {faqOpen && (
+        <Suspense fallback={<div className="transcript-empty">Loading help…</div>}>
+          <FaqPage onClose={() => setFaqOpen(false)} />
+        </Suspense>
+      )}
     </div>
   );
 }

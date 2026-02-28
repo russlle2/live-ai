@@ -46,7 +46,7 @@ function pruneWindow(entry: WindowEntry, windowMs: number, now: number): void {
 /**
  * Clean up stale entries periodically (every 10 minutes).
  */
-setInterval(() => {
+const cleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [k, v] of tenantHourly) {
     pruneWindow(v, HOUR_MS, now);
@@ -58,6 +58,8 @@ setInterval(() => {
   }
   // Session counters are cleaned up when sessions end — no action needed here
 }, 10 * MINUTE_MS);
+
+cleanupTimer.unref();
 
 /**
  * rateLimitCoaching — Express middleware for the transcript_final route.
@@ -169,4 +171,38 @@ function logRateLimited(tenantId: string, sessionId: string, limitType: string, 
     eventType: "rate_limited",
     data: { limitType, limit }
   });
+}
+
+type RouteWindow = { timestamps: number[] };
+
+export function createRouteRateLimit(options: {
+  key: string;
+  max: number;
+  windowMs: number;
+  keySelector: (req: Request) => string;
+}) {
+  const buckets = new Map<string, RouteWindow>();
+
+  return function routeRateLimit(req: Request, res: Response, next: NextFunction): void {
+    const now = Date.now();
+    const key = `${options.key}:${options.keySelector(req) || "anonymous"}`;
+    const bucket = buckets.get(key) ?? { timestamps: [] };
+    pruneWindow(bucket as WindowEntry, options.windowMs, now);
+
+    if (bucket.timestamps.length >= options.max) {
+      const retryMs = Math.ceil((bucket.timestamps[0] + options.windowMs - now) / 1000);
+      res.set("Retry-After", String(Math.max(1, retryMs)));
+      res.status(429).json({
+        ok: false,
+        error: "rate_limited",
+        detail: `Too many requests for ${options.key}`,
+        retryAfter: `${Math.max(1, retryMs)}s`
+      });
+      return;
+    }
+
+    bucket.timestamps.push(now);
+    buckets.set(key, bucket);
+    next();
+  };
 }

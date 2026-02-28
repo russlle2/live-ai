@@ -32,7 +32,7 @@ declare global {
  */
 export function signToken(payload: Omit<AuthPayload, "iat" | "exp">): string {
   if (!CONFIG.jwtSecret) throw new Error("JWT_SECRET is not configured");
-  return jwt.sign(payload, CONFIG.jwtSecret, { expiresIn: "8h" });
+  return jwt.sign(payload, CONFIG.jwtSecret, { expiresIn: CONFIG.authTokenTtl as jwt.SignOptions["expiresIn"] });
 }
 
 /**
@@ -44,6 +44,11 @@ function verifyToken(token: string): AuthPayload | null {
   } catch {
     return null;
   }
+}
+
+export function decodeAuthToken(token: string): AuthPayload | null {
+  if (!CONFIG.jwtSecret) return null;
+  return verifyToken(token);
 }
 
 /**
@@ -62,6 +67,15 @@ let devWarned = false;
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
   // ── Dev/demo bypass ──
   if (!CONFIG.jwtSecret) {
+    if (process.env.NODE_ENV === "production" && !CONFIG.allowInsecureDemoAuth) {
+      res.status(503).json({
+        ok: false,
+        error: "auth_not_configured",
+        message: "JWT auth must be configured in production"
+      });
+      return;
+    }
+
     if (!devWarned) {
       console.warn("[auth] JWT_SECRET not set — running in DEMO MODE (no auth enforced). Set JWT_SECRET in .env for production.");
       devWarned = true;

@@ -1,3 +1,27 @@
+type RequestOptions = {
+  method?: "GET" | "POST";
+  body?: Record<string, unknown>;
+  token?: string | null;
+};
+
+async function requestJson<T>(path: string, httpBase?: string, options: RequestOptions = {}): Promise<T> {
+  const base = httpBase || "http://localhost:8080";
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (options.token) headers.Authorization = `Bearer ${options.token}`;
+
+  const res = await fetch(`${base}${path}`, {
+    method: options.method ?? "GET",
+    headers,
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error((json as any)?.message || (json as any)?.error || `request_failed_${res.status}`);
+  }
+  return json as T;
+}
+
 export async function postUiEvent(
   e: {
     tenantId: string;
@@ -6,15 +30,11 @@ export async function postUiEvent(
     eventType: string;
     data?: Record<string, unknown>;
   },
-  httpBase?: string
+  httpBase?: string,
+  token?: string | null
 ) {
-  const base = httpBase || "http://localhost:8080";
   try {
-    await fetch(`${base}/api/ui-event`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(e),
-    });
+    await requestJson("/api/ui-event", httpBase, { method: "POST", body: e, token });
   } catch {
     // Silently fail — telemetry should never break the UX
     console.warn("[api] Failed to send UI event:", e.eventType);
@@ -34,18 +54,28 @@ export async function postCrmNote(
     idempotencyKey: string;
     payload: Record<string, unknown>;
   },
-  httpBase?: string
+  httpBase?: string,
+  token?: string | null
 ): Promise<CrmWriteResult> {
-  const base = httpBase || "http://localhost:8080";
   try {
-    const res = await fetch(`${base}/api/integrations/write-note`, {
+    return await requestJson<CrmWriteResult>("/api/integrations/write-note", httpBase, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params),
+      body: params,
+      token
     });
-    return await res.json();
   } catch (err) {
     console.warn("[api] Failed to write CRM note:", err);
     return { ok: false, error: "network_error" };
   }
+}
+
+export async function login(
+  credentials: { tenantId: string; repId: string; role?: "rep" | "admin" | "viewer" },
+  httpBase?: string
+): Promise<{ token: string; mode: "demo" | "jwt" }> {
+  const data = await requestJson<{ ok: true; token: string; mode: "demo" | "jwt" }>("/api/auth/login", httpBase, {
+    method: "POST",
+    body: credentials
+  });
+  return { token: data.token, mode: data.mode };
 }

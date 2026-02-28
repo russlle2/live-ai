@@ -54,8 +54,10 @@ async function insertObsEventBatch(events: PendingEvent[]): Promise<void> {
   }
   // For multiple events, still use insertObsEvent individually
   // (a true VALUES-list batch can be added later for even more throughput)
-  await Promise.all(events.map((e) => insertObsEvent(e)));
+  await Promise.allSettled(events.map((e) => insertObsEvent(e)));
 }
+
+const SENSITIVE_KEY_PATTERN = /(token|secret|password|authorization|cookie|api[_-]?key|auth[_-]?tag|iv|encrypted)/i;
 
 function clampString(s: unknown, max = 200): string {
   const str = typeof s === "string" ? s : String(s ?? "");
@@ -72,7 +74,8 @@ function clampJson(x: any, depth = 0): any {
   if (typeof x === "object") {
     const out: any = {};
     for (const k of Object.keys(x).slice(0, 50)) {
-      out[clampString(k, 80)] = clampJson((x as any)[k], depth + 1);
+      const safeKey = clampString(k, 80);
+      out[safeKey] = SENSITIVE_KEY_PATTERN.test(safeKey) ? "[redacted]" : clampJson((x as any)[k], depth + 1);
     }
     return out;
   }
