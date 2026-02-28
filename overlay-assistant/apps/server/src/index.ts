@@ -1,6 +1,7 @@
 import http from "http";
 import express from "express";
 import cors from "cors";
+import compression from "compression";
 import { WebSocketServer } from "ws";
 import { z } from "zod";
 
@@ -14,6 +15,7 @@ import {
 
 import { CONFIG, ARBITRATION_LOCUS } from "./config";
 import { upsertSession, endSession, getTrustSummaryForTenant } from "./db/queries";
+import { pool, pingDb } from "./db/pool";
 import { emitLog } from "./obs/emitLog";
 import { arbitrateV1 } from "./arbitration/arbitration_v1";
 import { getAiCoaching, isAiCoachEnabled } from "./arbitration/ai_coach_v1";
@@ -61,8 +63,13 @@ app.disable("x-powered-by");
 if (CONFIG.trustProxy) app.set("trust proxy", 1);
 app.use(requestContext);
 app.use(applySecurityHeaders);
+if (CONFIG.compressionEnabled) app.use(compression());
 app.use(express.json({ limit: "256kb" }));
-app.use(cors({ origin: CONFIG.webOrigin === "*" ? true : CONFIG.webOrigin, credentials: true }));
+app.use(cors({
+  origin: CONFIG.webOrigin === "*" ? true : CONFIG.webOrigin,
+  credentials: true,
+  maxAge: 86400 // cache preflight for 24h
+}));
 
 const authRateLimit = createRouteRateLimit({
   key: "auth_login",
@@ -101,7 +108,17 @@ function asyncRoute<T extends express.Request>(
   };
 }
 
-app.get("/health", (_req, res) => res.json({ ok: true, arbitrationLocus: ARBITRATION_LOCUS }));
+app.get("/health", asyncRoute(async (_req, res) => {
+  const dbOk = await pingDb();
+  const status = dbOk ? 200 : 503;
+  return res.status(status).json({
+    ok: dbOk,
+    arbitrationLocus: ARBITRATION_LOCUS,
+    db: dbOk ? "connected" : "unreachable",
+    uptime: Math.round(process.uptime()),
+    timestamp: new Date().toISOString()
+  });
+}));
 
 const TranscriptFinalInput = z.object({
   session_id: z.string().min(1),
@@ -222,10 +239,11 @@ app.post("/api/integrations/write-note", requireAuth, asyncRoute(async (req, res
 }));
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: CONFIG.wsPath });
+const wss = new WebSocketServer({ server, path: CONFIG.wsPath, maxPayload: 64 * 1024 });
 
 const sessions = new Map<string, SessionCtx>();
 const socketsBySession = new Map<string, Set<any>>();
+let totalWsConnections = 0;
 
 /* ── Patch coalescer: prevent patch spam ───────────────────────── */
 const COALESCE_WINDOW_MS = 500;
@@ -393,6 +411,15 @@ function startSttMock(ctx: SessionCtx) {
 }
 
 wss.on("connection", (ws) => {
+  totalWsConnections++;
+
+  // ── Connection limit guard ──
+  if (totalWsConnections > CONFIG.maxWsConnections) {
+    ws.close(1013, "server_at_capacity");
+    totalWsConnections--;
+    return;
+  }
+
   ws.on("message", async (buf) => {
     const raw = safeJsonParse(String(buf));
     if (!raw || typeof raw.type !== "string") return;
@@ -468,6 +495,7 @@ wss.on("connection", (ws) => {
   ws.on("pong", () => { /* client is alive */ });
 
   ws.on("close", () => {
+    totalWsConnections--;
     clearInterval(pingInterval);
     // Clean up socket from all session sets
     for (const [sid, socks] of socketsBySession.entries()) {
@@ -529,7 +557,72 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
   return sendErr(res, 500, "internal_error", process.env.NODE_ENV === "development" ? message : undefined);
 });
 
+/* ── Session timeout cleanup (every 60s, reap inactive sessions) ── */
+const SESSION_CLEANUP_INTERVAL = 60_000;
+const sessionCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [sid, ctx] of sessions.entries()) {
+    if (now - ctx.lastActivity > CONFIG.sessionTimeoutMs) {
+      sessions.delete(sid);
+      const socks = socketsBySession.get(sid);
+      if (socks) {
+        for (const ws of socks) {
+          try { ws.close(1000, "session_timeout"); } catch { /* ignore */ }
+        }
+        socketsBySession.delete(sid);
+      }
+      clearSessionRateLimit(sid);
+      endSession(sid).catch(() => {});
+      emitLog({
+        tenantId: ctx.tenantId, repId: ctx.repId, session_id: ctx.sessionId,
+        service: "server", eventType: "session_timeout",
+        data: { inactiveMs: now - ctx.lastActivity }
+      });
+    }
+  }
+}, SESSION_CLEANUP_INTERVAL);
+sessionCleanupTimer.unref();
+
+/* ── Graceful shutdown ────────────────────────────────────────── */
+let shuttingDown = false;
+
+async function gracefulShutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  // eslint-disable-next-line no-console
+  console.log(`[server] ${signal} received — shutting down gracefully…`);
+
+  // 1. Stop accepting new connections
+  server.close(() => {
+    // eslint-disable-next-line no-console
+    console.log("[server] HTTP server closed");
+  });
+
+  // 2. Close all WebSocket connections
+  for (const [, socks] of socketsBySession.entries()) {
+    for (const ws of socks) {
+      try { ws.close(1001, "server_shutting_down"); } catch { /* ignore */ }
+    }
+  }
+
+  // 3. End all active sessions in DB
+  const endPromises = [...sessions.keys()].map((sid) => endSession(sid).catch(() => {}));
+  await Promise.allSettled(endPromises);
+
+  // 4. Drain DB connection pool
+  await pool.end().catch(() => {});
+
+  // eslint-disable-next-line no-console
+  console.log("[server] Shutdown complete");
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
 server.listen(CONFIG.port, () => {
   // eslint-disable-next-line no-console
   console.log(`[server] listening on http://localhost:${CONFIG.port}`);
+  // eslint-disable-next-line no-console
+  console.log(`[server] WebSocket path: ${CONFIG.wsPath} | AI: ${isAiCoachEnabled() ? CONFIG.openaiModel : "templates"} | Locus: ${ARBITRATION_LOCUS}`);
 });

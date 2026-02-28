@@ -8,7 +8,9 @@ const SECURITY_HEADERS: Record<string, string> = {
   "Referrer-Policy": "strict-origin-when-cross-origin",
   "Permissions-Policy": "camera=(), microphone=(self), geolocation=(), usb=(), payment=()",
   "Cross-Origin-Opener-Policy": "same-origin",
-  "Cross-Origin-Resource-Policy": "same-site"
+  "Cross-Origin-Resource-Policy": "same-site",
+  "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+  "Pragma": "no-cache"
 };
 
 function buildCsp(): string {

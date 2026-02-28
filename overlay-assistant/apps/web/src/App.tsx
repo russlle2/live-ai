@@ -3,6 +3,8 @@ import type { OverlayMessageV1, OverlayStateV1, WsServerMessageV1 } from "@overl
 import { sanitizePatch_v1 } from "@overlay-assistant/shared";
 import { OverlayPreview } from "./components/OverlayPreview";
 import { SoundWaveOrb } from "./components/SoundWaveOrb";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { useToast } from "./components/Toast";
 import type { ProductProfile } from "./components/ProfileManager";
 import { login, postUiEvent, postCrmNote } from "./lib/api";
 import { useSpeechRecognition } from "./lib/useSpeechRecognition";
@@ -54,6 +56,9 @@ export function App() {
   const [micInterim, setMicInterim] = useState("");
   const [faqOpen, setFaqOpen] = useState(false);
   const [authToken, setAuthToken] = useState<string | null>(null);
+  const [sessionStart, setSessionStart] = useState<number | null>(null);
+  const [sessionElapsed, setSessionElapsed] = useState("");
+  const { addToast, ToastContainer } = useToast();
   const wsRef = useRef<WebSocket | null>(null);
   const authTokenRef = useRef<string | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -69,6 +74,23 @@ export function App() {
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [transcript]);
+
+  /* ── Session duration timer ─────────────────────────────────── */
+  useEffect(() => {
+    if (!sessionStart) { setSessionElapsed(""); return; }
+    const tick = () => {
+      const s = Math.floor((Date.now() - sessionStart) / 1000);
+      const m = Math.floor(s / 60);
+      const h = Math.floor(m / 60);
+      setSessionElapsed(
+        h > 0 ? `${h}:${String(m % 60).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`
+               : `${m}:${String(s % 60).padStart(2, "0")}`
+      );
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [sessionStart]);
 
   /* ── Detect API host (works on localhost, Codespaces, & any proxy) ── */
   const { wsUrl, httpBase } = useMemo(() => {
@@ -173,7 +195,7 @@ export function App() {
       ws.onmessage = async (ev) => {
         try {
           const msg = JSON.parse(ev.data) as WsServerMessageV1;
-          if (msg.type === "ready") { hasConnected.current = true; setWsStatus("ready"); setOrbMode("listening"); setError(null); return; }
+          if (msg.type === "ready") { hasConnected.current = true; setWsStatus("ready"); setOrbMode("listening"); setError(null); setSessionStart(Date.now()); return; }
           if (msg.type === "transcript_final") {
             setTranscript((t) => [...t, { text: msg.text, speaker: "unknown", at: new Date().toISOString() }]);
             flashOrb("listening", 2000);
@@ -194,13 +216,16 @@ export function App() {
       };
 
       ws.onerror = () => {
-        setError(hasConnected.current ? "Connection lost. Reconnecting\u2026" : "Could not reach the server. Check that it\u2019s running and try again.");
+        const msg = hasConnected.current ? "Connection lost. Reconnecting\u2026" : "Could not reach the server. Check that it\u2019s running and try again.";
+        setError(msg);
+        addToast("error", msg, 6000);
       };
     }).catch(() => {
       setError("Authentication failed. Check tenant/rep identity and server configuration.");
+      addToast("error", "Authentication failed", 6000);
       setWsStatus("disconnected");
     });
-  }, [wsUrl, sessionId, tenantId, repId, handleOverlayMessage, flashOrb, ensureAuth]);
+  }, [wsUrl, sessionId, tenantId, repId, handleOverlayMessage, flashOrb, ensureAuth, addToast]);
 
   /* ── Cleanup on unmount ─────────────────────────────────────── */
   useEffect(() => {
@@ -279,6 +304,30 @@ export function App() {
     [sendTranscript]
   );
 
+  /* ── Global keyboard shortcuts ──────────────────────────────── */
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Ctrl/Cmd + M → toggle mic
+      if ((e.ctrlKey || e.metaKey) && e.key === "m") {
+        e.preventDefault();
+        if (micSupported && wsStatus === "ready") toggleMic();
+      }
+      // Ctrl/Cmd + K → focus input
+      if ((e.ctrlKey || e.metaKey) && e.key === "k") {
+        e.preventDefault();
+        const input = document.querySelector<HTMLTextAreaElement>(".input-field");
+        input?.focus();
+      }
+      // Escape → close modals
+      if (e.key === "Escape") {
+        if (faqOpen) setFaqOpen(false);
+        if (profileOpen) setProfileOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [micSupported, wsStatus, toggleMic, faqOpen, profileOpen]);
+
   /* ── Telemetry callbacks ────────────────────────────────────── */
   const onShown = async (itemId: string) => { postUiEvent({ tenantId, repId, sessionId, eventType: "suggestion_shown", data: { itemId } }, httpBase, authTokenRef.current); };
   const onApply = async (itemId: string) => { postUiEvent({ tenantId, repId, sessionId, eventType: "suggestion_applied", data: { itemId } }, httpBase, authTokenRef.current); };
@@ -303,6 +352,8 @@ export function App() {
     setWsStatus("disconnected");
     setOrbMode("idle");
     setError(null);
+    setSessionStart(null);
+    addToast("info", "New session started", 3000);
   };
 
   const statusClass = wsStatus === "ready" ? "connected" : wsStatus === "connecting" ? "connecting" : "disconnected";
@@ -351,6 +402,11 @@ export function App() {
   // ── Main Application Shell ──
   return (
     <div className="app-shell">
+      {/* Skip to content — accessibility */}
+      <a href="#panel-session" className="skip-link">Skip to main content</a>
+
+      <ToastContainer />
+
       {/* ── Top Bar ────────────────────────────────────────── */}
       <header className="top-bar" role="banner">
         <div className="top-bar-brand">
@@ -362,6 +418,13 @@ export function App() {
         </div>
 
         <div className="top-bar-right">
+          {sessionElapsed && wsStatus === "ready" && (
+            <div className="session-timer" aria-label={`Session duration: ${sessionElapsed}`} title="Session duration">
+              <span className="session-timer-icon" aria-hidden="true">⏱</span>
+              {sessionElapsed}
+            </div>
+          )}
+
           {activeProfile && (
             <div className="active-profile-chip">
               <span>●</span> {activeProfile.name}
@@ -416,9 +479,11 @@ export function App() {
       {/* ── Tab Content ────────────────────────────────────── */}
       {tab === "insights" ? (
         <section id="panel-insights" role="tabpanel" aria-labelledby="tab-insights">
-          <Suspense fallback={<div className="transcript-empty">Loading insights…</div>}>
-            <TrustDashboard tenantId={tenantId} httpBase={httpBase} token={authToken} />
-          </Suspense>
+          <ErrorBoundary>
+            <Suspense fallback={<div className="transcript-empty">Loading insights…</div>}>
+              <TrustDashboard tenantId={tenantId} httpBase={httpBase} token={authToken} />
+            </Suspense>
+          </ErrorBoundary>
 
           {/* CRM Demo Panel */}
           <div className="trust-panel" style={{ marginTop: 16 }}>
@@ -547,8 +612,8 @@ export function App() {
               </div>
               <div className="input-hint">
                 {micSupported
-                  ? (micOn ? "🔴 Mic active — speaking is auto-sent · You can also type" : "🎤 Click mic for hands-free · Enter to send text")
-                  : "Press Enter to send · Shift+Enter for new line"}
+                  ? (micOn ? "🔴 Mic active — speaking is auto-sent · You can also type" : "🎤 Click mic for hands-free · Enter to send · Ctrl+M toggle mic")
+                  : "Press Enter to send · Shift+Enter for new line · Ctrl+K to focus"}
                 {aiMode === "ai" && <span style={{ float: "right", color: "var(--color-success)" }}>● AI Coach Active</span>}
                 {aiMode === "templates" && <span style={{ float: "right", opacity: 0.5 }}>○ Template Mode</span>}
               </div>
