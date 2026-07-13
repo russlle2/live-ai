@@ -1,5 +1,6 @@
 import pg from "pg";
-import { CONFIG } from "../config";
+import { CONFIG } from "../config.js";
+import { buildDatabaseSslOptions } from "./ssl.js";
 
 export const pool = new pg.Pool({
   connectionString: CONFIG.databaseUrl,
@@ -7,8 +8,13 @@ export const pool = new pg.Pool({
   idleTimeoutMillis: 30_000,      // close idle connections after 30s
   connectionTimeoutMillis: 3_000, // fail-fast if PG unreachable
   statement_timeout: 5_000,       // kill any query running > 5s
-  ...(CONFIG.dbSsl ? { ssl: { rejectUnauthorized: false } } : {})
-} as any);
+  // An explicit `false` also prevents PGSSLMODE from silently overriding the
+  // local DB_SSL=false policy. Enabled TLS always verifies CA + DNS identity.
+  ssl: buildDatabaseSslOptions({
+    enabled: CONFIG.dbSsl,
+    caFile: CONFIG.dbSslCaFile
+  })
+});
 
 /** Lightweight DB connectivity check for health endpoints */
 export async function pingDb(): Promise<boolean> {

@@ -9,6 +9,8 @@
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "coaching:stage:helpsteer2": "node --import tsx src/knowledge/stage_helpsteer2_cli.ts",
+    "smoke:runtime": "node scripts/runtime_smoke.mjs",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:migrate:prod": "NODE_ENV=production tsx src/db/migrate.ts"
   },
@@ -21,8 +23,7 @@
     "jsonwebtoken": "^9.0.3",
     "openai": "^6.25.0",
     "pg": "^8.12.0",
-    "uuid": "^9.0.1",
-    "ws": "^8.18.0",
+    "ws": "^8.21.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

@@ -1,0 +1,35 @@
+{
+  "name": "Live Rhetoric — Personal Response Aide",
+  "short_name": "Live Rhetoric",
+  "description": "A personal real-time response guide for interviews, service calls, support, sales, and negotiation.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#07100e",
+  "theme_color": "#07100e",
+  "categories": ["productivity", "business", "utilities"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Start audio-host session",
+      "short_name": "New session",
+      "url": "/?role=audio_host",
+      "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+    }
+  ]
+}

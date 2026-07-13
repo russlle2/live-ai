@@ -6,17 +6,19 @@
  * or abusing the coaching endpoint.
  *
  * Limits:
- *   - 60 coaching requests per session (per transcript_final route)
- *   - 200 requests per tenant per hour
- *   - 20 requests per tenant per minute (burst protection)
+ *   - 500 coaching requests per session (per transcript_final route)
+ *   - 2,000 requests per owner per hour
+ *   - 120 requests per owner per minute (burst protection)
  *
  * All limits are configurable via environment variables.
  */
 
 import type { Request, Response, NextFunction } from "express";
-import { emitLog } from "../obs/emitLog";
+import { CONFIG } from "../config.js";
+import { emitLog } from "../obs/emitLog.js";
 
 type WindowEntry = { timestamps: number[]; blocked: number };
+type RouteWindow = { timestamps: number[] };
 
 // ── Per-tenant hourly window ──
 const tenantHourly = new Map<string, WindowEntry>();
@@ -24,14 +26,15 @@ const tenantHourly = new Map<string, WindowEntry>();
 const tenantMinute = new Map<string, WindowEntry>();
 // ── Per-session lifetime counter ──
 const sessionCounter = new Map<string, { count: number; blocked: number }>();
+const routeBucketRegistries = new Set<Map<string, RouteWindow>>();
 
 const HOUR_MS = 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 
 // Configurable limits (env vars or defaults)
-const MAX_PER_SESSION = Number(process.env.RATE_LIMIT_PER_SESSION ?? 60);
-const MAX_PER_TENANT_HOUR = Number(process.env.RATE_LIMIT_PER_TENANT_HOUR ?? 200);
-const MAX_PER_TENANT_MINUTE = Number(process.env.RATE_LIMIT_PER_TENANT_MINUTE ?? 20);
+const MAX_PER_SESSION = CONFIG.rateLimitPerSession;
+const MAX_PER_TENANT_HOUR = CONFIG.rateLimitPerTenantHour;
+const MAX_PER_TENANT_MINUTE = CONFIG.rateLimitPerTenantMinute;
 
 /**
  * Prune timestamps older than the window.
@@ -72,6 +75,12 @@ cleanupTimer.unref();
  * Returns 429 with Retry-After header if limit is exceeded.
  */
 export function rateLimitCoaching(req: Request, res: Response, next: NextFunction): void {
+  const speaker = req.body?.source ?? req.body?.speaker ?? "unknown";
+  if (speaker !== "lead") {
+    next();
+    return;
+  }
+
   const tenantId = req.auth?.tenantId || req.body?.tenantId || "unknown";
   const sessionId = req.body?.session_id || "unknown";
   const now = Date.now();
@@ -147,6 +156,14 @@ export function clearSessionRateLimit(sessionId: string): void {
   sessionCounter.delete(sessionId);
 }
 
+/** Remove all owner request timing metadata during an explicit private-data purge. */
+export function clearAllRateLimits(): void {
+  tenantHourly.clear();
+  tenantMinute.clear();
+  sessionCounter.clear();
+  for (const buckets of routeBucketRegistries) buckets.clear();
+}
+
 /**
  * Get rate limit stats for monitoring/admin.
  */
@@ -173,8 +190,6 @@ function logRateLimited(tenantId: string, sessionId: string, limitType: string, 
   });
 }
 
-type RouteWindow = { timestamps: number[] };
-
 export function createRouteRateLimit(options: {
   key: string;
   max: number;
@@ -182,6 +197,7 @@ export function createRouteRateLimit(options: {
   keySelector: (req: Request) => string;
 }) {
   const buckets = new Map<string, RouteWindow>();
+  routeBucketRegistries.add(buckets);
 
   return function routeRateLimit(req: Request, res: Response, next: NextFunction): void {
     const now = Date.now();

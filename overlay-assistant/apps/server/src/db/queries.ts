@@ -1,4 +1,4 @@
-import { withClient } from "./pool";
+import { withClient } from "./pool.js";
 
 export async function upsertSession(params: { sessionId: string; tenantId: string; repId: string; }): Promise<void> {
   const { sessionId, tenantId, repId } = params;
@@ -92,5 +92,31 @@ export async function getTrustSummaryForTenant(tenantId: string): Promise<TrustS
     };
 
     return { ...base, trustScore: computeTrustScoreV1(base) };
+  });
+}
+
+/** The runtime is single-owner; purge every legacy and current metadata row. */
+export async function purgeAllRuntimeDatabaseData(): Promise<Record<string, number>> {
+  return withClient(async (c) => {
+    await c.query("BEGIN");
+    try {
+      const tables = [
+        "obs_events",
+        "crm_write_events",
+        "oauth_credentials",
+        "trust_daily",
+        "sessions"
+      ] as const;
+      const removed: Record<string, number> = {};
+      for (const table of tables) {
+        const result = await c.query(`DELETE FROM ${table}`);
+        removed[table] = result.rowCount ?? 0;
+      }
+      await c.query("COMMIT");
+      return removed;
+    } catch (error) {
+      await c.query("ROLLBACK");
+      throw error;
+    }
   });
 }

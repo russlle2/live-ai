@@ -10,7 +10,7 @@
  * and provides aggregation queries for dashboards.
  */
 
-import { emitLog } from "../obs/emitLog";
+import { emitLog } from "../obs/emitLog.js";
 
 export type TokenUsageRecord = {
   tenantId: string;
@@ -22,6 +22,7 @@ export type TokenUsageRecord = {
   totalTokens: number;
   latencyMs: number;
   cached: boolean;
+  service?: string;
 };
 
 // ── In-memory aggregates for fast dashboard queries ──
@@ -36,6 +37,13 @@ type TenantUsage = {
 
 const tenantUsage = new Map<string, TenantUsage>();
 
+/** Clear in-memory token/request/timestamp aggregates during owner deletion. */
+export function clearAllTokenUsage(): number {
+  const removed = tenantUsage.size;
+  tenantUsage.clear();
+  return removed;
+}
+
 /**
  * Log a single OpenAI API call's token usage.
  * Called after every successful AI coaching response.
@@ -46,7 +54,7 @@ export async function logTokenUsage(record: TokenUsageRecord): Promise<void> {
     tenantId: record.tenantId,
     repId: record.repId,
     session_id: record.sessionId,
-    service: "ai_coach",
+    service: record.service ?? "ai_coach",
     eventType: "ai_token_usage",
     data: {
       model: record.model,
@@ -54,9 +62,7 @@ export async function logTokenUsage(record: TokenUsageRecord): Promise<void> {
       completionTokens: record.completionTokens,
       totalTokens: record.totalTokens,
       latencyMs: record.latencyMs,
-      cached: record.cached,
-      // Estimated cost (gpt-4o-mini pricing: $0.15/1M input, $0.60/1M output)
-      estimatedCostUsd: estimateCost(record.model, record.promptTokens, record.completionTokens)
+      cached: record.cached
     }
   });
 
@@ -82,22 +88,6 @@ export async function logTokenUsage(record: TokenUsageRecord): Promise<void> {
 }
 
 /**
- * Estimate USD cost for a given model + token counts.
- * Prices as of 2025 — update when OpenAI changes pricing.
- */
-function estimateCost(model: string, promptTokens: number, completionTokens: number): number {
-  const pricing: Record<string, { input: number; output: number }> = {
-    "gpt-4o-mini":    { input: 0.15 / 1_000_000,  output: 0.60 / 1_000_000 },
-    "gpt-4o":         { input: 2.50 / 1_000_000,   output: 10.00 / 1_000_000 },
-    "gpt-4-turbo":    { input: 10.00 / 1_000_000,  output: 30.00 / 1_000_000 },
-    "gpt-3.5-turbo":  { input: 0.50 / 1_000_000,   output: 1.50 / 1_000_000 },
-  };
-
-  const p = pricing[model] ?? pricing["gpt-4o-mini"];
-  return promptTokens * p.input + completionTokens * p.output;
-}
-
-/**
  * Get usage summary for a specific tenant.
  */
 export function getTenantUsageSummary(tenantId: string) {
@@ -107,7 +97,7 @@ export function getTenantUsageSummary(tenantId: string) {
       tenantId,
       totalRequests: 0,
       totalTokens: 0,
-      estimatedCostUsd: 0,
+      costEstimateStatus: "unavailable_incomplete_metering" as const,
       avgLatencyMs: 0
     };
   }
@@ -119,7 +109,7 @@ export function getTenantUsageSummary(tenantId: string) {
     totalTokens,
     promptTokens: usage.totalPromptTokens,
     completionTokens: usage.totalCompletionTokens,
-    estimatedCostUsd: estimateCost("gpt-4o-mini", usage.totalPromptTokens, usage.totalCompletionTokens),
+    costEstimateStatus: "unavailable_incomplete_metering" as const,
     avgLatencyMs: Math.round(usage.totalLatencyMs / usage.totalRequests),
     firstSeen: new Date(usage.firstSeen).toISOString(),
     lastSeen: new Date(usage.lastSeen).toISOString()

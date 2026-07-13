@@ -1,3 +1,7 @@
+# ARCHIVED — predecessor SaaS data-retention draft
+
+This file is historical design context. It does not describe the current personal app, which may store transcripts under an ignored private runtime path. It must not be used as a compliance statement.
+
 # Data Flow & Data Retention Statement
 
 ## Purpose

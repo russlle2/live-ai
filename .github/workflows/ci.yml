@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "overlay-assistant/**"
+      - ".github/workflows/ci.yml"
+      - ".gitignore"
+      - "README.md"
+  pull_request:
+    branches: [main]
+    paths:
+      - "overlay-assistant/**"
+      - ".github/workflows/ci.yml"
+      - ".gitignore"
+      - "README.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-rhetoric-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: overlay-assistant
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: overlay-assistant/pnpm-lock.yaml
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and test
+        run: pnpm run check
+
+      - name: Production build
+        run: pnpm run build
+
+      - name: Runtime HTTP and WebSocket smoke
+        run: pnpm -C apps/server smoke:runtime
+
+      - name: Speaker fallback unit tests
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=services/speaker/src python -m unittest discover -s services/speaker/tests -v
+          PYTHONDONTWRITEBYTECODE=1 python -m compileall -q -f services/speaker/src services/speaker/tests
+
+      - name: Assert private data is not tracked
+        working-directory: .
+        run: |
+          PRIVATE_TRACKED="$(git ls-files | grep -E '(^|/)\.env($|\.)|(^|/)data/private/|^overlay-assistant/(recordings|voice-samples|google-exports)/' | grep -v -E '(^|/)\.env\.example$' || true)"
+          test -z "$PRIVATE_TRACKED" || {
+            echo "Private runtime data is tracked"
+            echo "$PRIVATE_TRACKED"
+            exit 1
+          }

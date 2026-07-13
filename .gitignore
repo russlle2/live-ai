@@ -2,5 +2,34 @@ node_modules/
 dist/
 .pgdata/
 .env
+.env.local
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
 *.log
 .DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Personal-only runtime data (the repository is public)
+overlay-assistant/data/private/
+# Defense in depth if a tool is ever launched from an unexpected workspace cwd.
+**/data/private/
+overlay-assistant/.run/
+overlay-assistant/.hf-cache/
+overlay-assistant/recordings/
+overlay-assistant/voice-samples/
+overlay-assistant/google-exports/
+*.sqlite
+*.sqlite3
+*.db
+*.wav
+*.m4a
+*.mp3
+*.pem
+*.key
+credentials*.json
+token*.json

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────
-# Sales Coach Pro — Quick Launch Script
+# Live Rhetoric — Quick Launch Script
 # Works on Linux, macOS, and Windows (Git Bash / WSL)
 # ──────────────────────────────────────────────────────────
 set -euo pipefail
@@ -20,52 +20,113 @@ cd "$PROJECT_DIR"
 
 # ── Check prerequisites ──
 command -v pnpm &>/dev/null || fail "pnpm is required. Install with: npm install -g pnpm"
-command -v docker &>/dev/null || warn "Docker not found — database might not start"
 
-# ── Start database ──
-if command -v docker &>/dev/null; then
-  log "Starting PostgreSQL database…"
-  docker compose up -d db 2>/dev/null || docker-compose up -d db 2>/dev/null || warn "Could not start DB"
-  
-  # Wait for DB to be healthy (max 30s)
-  log "Waiting for database…"
-  for i in $(seq 1 30); do
-    if docker compose exec -T db pg_isready -U overlay &>/dev/null 2>&1; then
-      log "Database is ready"
-      break
+COMPOSE_AVAILABLE=false
+if command -v docker &>/dev/null && docker compose version &>/dev/null; then
+  COMPOSE_VERSION="$(docker compose version --short 2>/dev/null || true)"
+  COMPOSE_VERSION="${COMPOSE_VERSION#v}"
+  COMPOSE_MAJOR="${COMPOSE_VERSION%%.*}"
+  COMPOSE_REMAINDER="${COMPOSE_VERSION#*.}"
+  COMPOSE_MINOR="${COMPOSE_REMAINDER%%.*}"
+  if [[ "$COMPOSE_MAJOR" =~ ^[0-9]+$ ]] && [[ "$COMPOSE_MINOR" =~ ^[0-9]+$ ]] \
+    && { [ "$COMPOSE_MAJOR" -gt 2 ] || { [ "$COMPOSE_MAJOR" -eq 2 ] && [ "$COMPOSE_MINOR" -ge 24 ]; }; }; then
+    COMPOSE_AVAILABLE=true
+  else
+    warn "Docker Compose 2.24+ is required for the private service stack (found ${COMPOSE_VERSION:-unknown}); continuing without it"
+  fi
+else
+  warn "Docker Compose not found — database and voice verification will not start"
+fi
+
+COMPOSE_ENV=()
+if [ -f "$PROJECT_DIR/../.env.local" ]; then
+  COMPOSE_ENV=(--env-file "$PROJECT_DIR/../.env.local")
+fi
+COMPOSE_FILES=(-f "$PROJECT_DIR/docker-compose.yml" -f "$PROJECT_DIR/docker-compose.dev.yml")
+
+compose() {
+  docker compose "${COMPOSE_ENV[@]}" "${COMPOSE_FILES[@]}" "$@"
+}
+
+# ── Start private services ──
+DB_READY=false
+if [ "$COMPOSE_AVAILABLE" = true ]; then
+  log "Starting PostgreSQL and the private speaker verifier…"
+  if compose up -d db speaker; then
+    log "Waiting for database…"
+    for i in $(seq 1 30); do
+      if compose exec -T db pg_isready -U overlay -d overlay &>/dev/null; then
+        DB_READY=true
+        log "Database is ready"
+        break
+      fi
+      sleep 1
+    done
+    if [ "$DB_READY" != true ]; then
+      warn "Database did not become ready; the app will run in degraded mode"
     fi
-    sleep 1
-    if [ "$i" = "30" ]; then warn "Database may not be ready yet"; fi
-  done
+  else
+    warn "Could not start PostgreSQL/speaker services; the app will run in degraded mode"
+  fi
 fi
 
-# ── Install dependencies (if needed) ──
-if [ ! -d "node_modules" ]; then
-  log "Installing dependencies…"
-  pnpm install
-fi
+# ── Install exactly the committed dependency graph ──
+log "Verifying dependencies from pnpm-lock.yaml…"
+pnpm install --frozen-lockfile
 
 # ── Run DB migrations ──
-log "Running database migrations…"
-pnpm -C apps/server db:migrate 2>/dev/null || warn "Migrations may have failed (DB might be seeded already)"
+if [ "$DB_READY" = true ]; then
+  log "Running database migrations…"
+  pnpm -C apps/server db:migrate || fail "Database migrations failed"
+else
+  warn "Skipping database migrations because PostgreSQL is unavailable"
+fi
 
 # ── Start dev servers ──
 mkdir -p "$RUN_DIR"
+if [ -f "$RUN_DIR/dev.pid" ]; then
+  EXISTING_PID="$(tr -dc '0-9' < "$RUN_DIR/dev.pid")"
+  if [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
+    fail "Live Rhetoric is already running with PID $EXISTING_PID"
+  fi
+fi
+
+DEV_PID=""
+cleanup() {
+  if [ -n "$DEV_PID" ] && kill -0 "$DEV_PID" 2>/dev/null; then
+    kill "$DEV_PID" 2>/dev/null || true
+    wait "$DEV_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
 log "Starting development servers…"
 pnpm dev > "$RUN_DIR/dev.log" 2>&1 &
 DEV_PID=$!
-echo "$DEV_PID" > "$RUN_DIR/dev.pid"
+printf '%s\n' "$DEV_PID" > "$RUN_DIR/dev.pid"
 
-# ── Wait for web server ──
-log "Waiting for web app (http://localhost:5173)…"
+# ── Verify both public surfaces ──
+log "Waiting for API and web app…"
+API_READY=false
+WEB_READY=false
 for i in $(seq 1 60); do
-  if curl -sf http://localhost:5173 > /dev/null 2>&1; then
-    log "Web app is ready!"
+  if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then API_READY=true; fi
+  if curl -fsS http://127.0.0.1:5173/ >/dev/null 2>&1; then WEB_READY=true; fi
+  if [ "$API_READY" = true ] && [ "$WEB_READY" = true ]; then
     break
   fi
+  if ! kill -0 "$DEV_PID" 2>/dev/null; then
+    tail -n 40 "$RUN_DIR/dev.log" >&2 || true
+    fail "Development servers exited before becoming ready"
+  fi
   sleep 1
-  if [ "$i" = "60" ]; then warn "Web app took longer than expected to start"; fi
 done
+
+if [ "$API_READY" != true ] || [ "$WEB_READY" != true ]; then
+  tail -n 40 "$RUN_DIR/dev.log" >&2 || true
+  fail "Readiness timed out (API=$API_READY, web=$WEB_READY)"
+fi
+log "API and web app are ready"
 
 # ── Open browser ──
 URL="http://localhost:5173"
@@ -76,10 +137,9 @@ elif command -v start &>/dev/null; then start "$URL"
 else log "Open $URL in your browser"
 fi
 
-log "Sales Coach Pro is running! (PID: $DEV_PID)"
+log "Live Rhetoric is running! (PID: $DEV_PID)"
 log "Logs: $RUN_DIR/dev.log"
-log "Stop: kill $DEV_PID (or Ctrl+C)"
+log "Stop the app with Ctrl+C. Docker services remain available for the next launch."
 
 # ── Keep running until Ctrl+C ──
-trap 'log "Shutting down…"; kill $DEV_PID 2>/dev/null; exit 0' INT TERM
-wait $DEV_PID 2>/dev/null || true
+wait "$DEV_PID"

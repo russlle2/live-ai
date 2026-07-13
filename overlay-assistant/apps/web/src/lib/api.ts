@@ -1,5 +1,7 @@
+import type { MemoryFactWriteInput } from "./memoryReview";
+
 type RequestOptions = {
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "DELETE";
   body?: Record<string, unknown>;
   token?: string | null;
 };
@@ -12,7 +14,8 @@ async function requestJson<T>(path: string, httpBase?: string, options: RequestO
   const res = await fetch(`${base}${path}`, {
     method: options.method ?? "GET",
     headers,
-    body: options.body ? JSON.stringify(options.body) : undefined
+    body: options.body ? JSON.stringify(options.body) : undefined,
+    cache: "no-store"
   });
 
   const json = await res.json().catch(() => ({}));
@@ -41,36 +44,8 @@ export async function postUiEvent(
   }
 }
 
-export type CrmWriteResult = {
-  ok: boolean;
-  result?: { status: string; externalId?: string; message?: string };
-  error?: unknown;
-};
-
-export async function postCrmNote(
-  params: {
-    tenantId: string;
-    integration: "salesforce" | "hubspot";
-    idempotencyKey: string;
-    payload: Record<string, unknown>;
-  },
-  httpBase?: string,
-  token?: string | null
-): Promise<CrmWriteResult> {
-  try {
-    return await requestJson<CrmWriteResult>("/api/integrations/write-note", httpBase, {
-      method: "POST",
-      body: params,
-      token
-    });
-  } catch (err) {
-    console.warn("[api] Failed to write CRM note:", err);
-    return { ok: false, error: "network_error" };
-  }
-}
-
 export async function login(
-  credentials: { tenantId: string; repId: string; role?: "rep" | "admin" | "viewer" },
+  credentials: { tenantId: string; repId: string; role?: "rep" | "admin" | "viewer"; accessCode?: string },
   httpBase?: string
 ): Promise<{ token: string; mode: "demo" | "jwt" }> {
   const data = await requestJson<{ ok: true; token: string; mode: "demo" | "jwt" }>("/api/auth/login", httpBase, {
@@ -78,4 +53,154 @@ export async function login(
     body: credentials
   });
   return { token: data.token, mode: data.mode };
+}
+
+export type RuntimeAutomationStatus = {
+  apiKey: {
+    configured: boolean;
+    serverOnly: boolean;
+    liveModel: string;
+    transcriptionModel: string;
+  };
+  memory: {
+    total: number;
+    userVerified: number;
+    byCategory: Record<string, number>;
+    bySource: Record<string, number>;
+    generatedAt?: string;
+    automaticRetrieval: boolean;
+  };
+  coachingKnowledge: {
+    total: number;
+    byDomain: Record<string, number>;
+    loaded: boolean;
+    automaticRetrieval: boolean;
+    separateFromPersonalMemory: boolean;
+    error?: string;
+  };
+  transcripts: {
+    automaticCapture: boolean;
+    automaticLearning: boolean;
+    learningIntervalTurns: number;
+    automaticDeliveryComparison: boolean;
+    automaticSpeakingStyleLearning: boolean;
+    deliveryLearningMinimumPairs: number;
+  };
+  google: {
+    configured: boolean;
+    authorized: boolean;
+    cachedSources: number;
+    pendingExtraction: number;
+    extractionBudget: {
+      day: string;
+      used: number;
+      dailyLimit: number;
+      perRunLimit: number;
+    };
+    sourceCapacity: {
+      used: number;
+      limit: number;
+      full: boolean;
+    };
+    lastSyncAt?: string;
+  };
+  voice: {
+    enabled: boolean;
+    status: "ok" | "degraded" | "disabled" | "unavailable";
+    ownerProfile: "enrolled" | "enrolling" | "deleting" | "not_enrolled" | "incompatible" | "invalid" | "unknown";
+    modelId?: string;
+    modelRevision?: string;
+    modelLoaded?: boolean;
+    sampleCount: number;
+    requiredSampleCount: number;
+    enrollmentComplete: boolean;
+    decisionPolicy: "owner_or_unknown_only";
+    automaticEnrollment: boolean;
+    rawAudioStored: false;
+    primaryIdentity: "separate_channels";
+  };
+};
+
+export async function getRuntimeAutomationStatus(
+  httpBase?: string,
+  token?: string | null
+): Promise<RuntimeAutomationStatus> {
+  const data = await requestJson<{ ok: true; automation: RuntimeAutomationStatus }>(
+    "/api/runtime/status",
+    httpBase,
+    { token }
+  );
+  return data.automation;
+}
+
+export async function beginGoogleAuthorization(
+  httpBase?: string,
+  token?: string | null
+): Promise<string> {
+  const data = await requestJson<{ url: string }>("/api/google/oauth/start", httpBase, {
+    method: "POST",
+    token
+  });
+  if (!data.url) throw new Error("The server did not return a Google authorization URL.");
+  return data.url;
+}
+
+export async function runGoogleMemorySync(
+  httpBase?: string,
+  token?: string | null
+): Promise<void> {
+  await requestJson("/api/google/sync", httpBase, { method: "POST", token });
+}
+
+export async function eraseAllPrivateData(
+  httpBase?: string,
+  token?: string | null
+): Promise<{ warnings: string[] }> {
+  const data = await requestJson<{ ok: true; warnings: string[] }>("/api/private-data", httpBase, {
+    method: "DELETE",
+    token,
+    body: {
+      confirmation: "ERASE MY PRIVATE DATA",
+      scopes: ["all"]
+    }
+  });
+  return { warnings: data.warnings ?? [] };
+}
+
+export async function getMemoryFacts(
+  httpBase?: string,
+  token?: string | null
+): Promise<{ facts: unknown[]; total: number }> {
+  const data = await requestJson<{ ok: true; facts?: unknown[]; total?: number }>(
+    "/api/memory/facts?includeRestricted=true",
+    httpBase,
+    { token }
+  );
+  return {
+    facts: Array.isArray(data.facts) ? data.facts : [],
+    total: typeof data.total === "number" ? data.total : 0
+  };
+}
+
+export async function verifyOrCorrectMemoryFact(
+  fact: MemoryFactWriteInput,
+  httpBase?: string,
+  token?: string | null
+): Promise<void> {
+  await requestJson("/api/memory/facts", httpBase, {
+    method: "POST",
+    body: { facts: [fact] },
+    token
+  });
+}
+
+export async function deleteMemoryFact(
+  id: string,
+  httpBase?: string,
+  token?: string | null
+): Promise<void> {
+  await requestJson(`/api/memory/facts/${encodeURIComponent(id)}`, httpBase, {
+    method: "DELETE",
+    token
+  });
 }

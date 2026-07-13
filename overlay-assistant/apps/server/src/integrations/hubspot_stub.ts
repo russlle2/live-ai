@@ -1,6 +1,6 @@
-import type { IntegrationWriteRequest, IntegrationWriteResult } from "./integration_interface";
-import { recordIdempotentWrite } from "./idempotency";
-import { emitLog } from "../obs/emitLog";
+import type { IntegrationWriteRequest, IntegrationWriteResult } from "./integration_interface.js";
+import { recordIdempotentWrite } from "./idempotency.js";
+import { emitLog } from "../obs/emitLog.js";
 
 export async function writeHubspotNote(req: IntegrationWriteRequest): Promise<IntegrationWriteResult> {
   const res: IntegrationWriteResult = {

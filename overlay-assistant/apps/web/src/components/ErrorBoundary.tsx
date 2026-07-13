@@ -5,7 +5,7 @@ type State = { hasError: boolean; error: Error | null; errorInfo: ErrorInfo | nu
 
 /**
  * React Error Boundary — catches render errors and shows a recovery UI
- * instead of a white screen. Critical for production SaaS applications.
+ * instead of a white screen.
  */
 export class ErrorBoundary extends Component<Props, State> {
   constructor(props: Props) {
@@ -37,7 +37,7 @@ export class ErrorBoundary extends Component<Props, State> {
             <div className="error-boundary-icon">⚠</div>
             <h2 className="error-boundary-title">Something went wrong</h2>
             <p className="error-boundary-text">
-              An unexpected error occurred. Your session data is safe.
+              An unexpected interface error occurred. Try again, or reload to reconnect.
             </p>
             {import.meta.env.DEV && this.state.error && (
               <pre className="error-boundary-detail">
