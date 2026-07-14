@@ -1,0 +1,207 @@
+{
+  "schema": "coaching_source_manifest_v1",
+  "policy": {
+    "externalContentDefault": "deny",
+    "requireAttributionTracking": true,
+    "rejectUnknownLicense": true,
+    "rejectNonCommercial": true,
+    "rejectNoDerivatives": true,
+    "separateFromPersonalMemory": true
+  },
+  "sources": [
+    {
+      "id": "live-ai-original-coaching-v1",
+      "title": "Live AI original coaching contrast set v1",
+      "url": "https://github.com/russlle2/live-ai/tree/main/overlay-assistant/data/coaching",
+      "license": "Proprietary / all rights reserved",
+      "provenanceQuality": "high",
+      "contentRisk": "low",
+      "status": "included",
+      "intendedUse": [
+        "Runtime retrieval of original good-versus-weak response pairs",
+        "Evaluation of response clarity, credibility, empathy, and next-step quality"
+      ],
+      "cautions": [
+        "Examples are fictional and must never be treated as facts about the owner",
+        "Policy, coverage, price, credential, and outcome claims require verified session context"
+      ],
+      "metadataVerifiedAt": "2026-07-13T00:00:00.000Z",
+      "metadataSource": "Repository license and locally authored data"
+    },
+    {
+      "id": "hf-nvidia-helpsteer2",
+      "title": "nvidia/HelpSteer2",
+      "url": "https://huggingface.co/datasets/nvidia/HelpSteer2",
+      "license": "CC-BY-4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+      "pinnedRevision": "990b2711a36180dd19d9c94b8627844866f8982a",
+      "sourceArtifact": "preference/preference.jsonl.gz",
+      "artifactSha256": "a5cd48600fb7a330cf0ccc8f59051e24e8f236907c379f42eff1ba18da55204b",
+      "provenanceQuality": "high",
+      "contentRisk": "medium",
+      "status": "candidate",
+      "intendedUse": [
+        "Offline evaluation of helpfulness, correctness, coherence, complexity, and verbosity",
+        "Quarantined preference-pair review with row-level attribution"
+      ],
+      "cautions": [
+        "Not domain-specific coaching data",
+        "The pinned 9,125-row snapshot was audited; only five short, strong, communication-focused rows passed automatic quarantine filters",
+        "Relative preference does not establish factual correctness, compliance, or live-coaching quality",
+        "Import requires attribution preservation, independent content review, and content/safety filtering",
+        "No rows are bundled in this repository"
+      ],
+      "metadataVerifiedAt": "2026-07-13T00:00:00.000Z",
+      "metadataSource": "Hugging Face Hub connector dataset card metadata"
+    },
+    {
+      "id": "hf-bitext-customer-support",
+      "title": "bitext/Bitext-customer-support-llm-chatbot-training-dataset",
+      "url": "https://huggingface.co/datasets/bitext/Bitext-customer-support-llm-chatbot-training-dataset",
+      "license": "CDLA-Sharing-1.0",
+      "licenseUrl": "https://cdla.dev/sharing-1-0/",
+      "provenanceQuality": "high",
+      "contentRisk": "medium",
+      "status": "legal_review",
+      "intendedUse": [
+        "Customer-service intent coverage",
+        "Language-variation robustness testing"
+      ],
+      "cautions": [
+        "Sharing-license obligations must be reviewed before copying or transforming rows",
+        "Hybrid synthetic source still requires quality, bias, and unsafe-language filtering",
+        "No rows are bundled in this repository"
+      ],
+      "metadataVerifiedAt": "2026-07-13T00:00:00.000Z",
+      "metadataSource": "Hugging Face Hub connector dataset card metadata"
+    },
+    {
+      "id": "hf-polyai-banking77",
+      "title": "PolyAI/banking77",
+      "url": "https://huggingface.co/datasets/PolyAI/banking77",
+      "license": "CC-BY-4.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+      "provenanceQuality": "high",
+      "contentRisk": "medium",
+      "status": "candidate",
+      "intendedUse": [
+        "Offline customer-intent taxonomy expansion",
+        "Intent-classification evaluation"
+      ],
+      "cautions": [
+        "Contains customer queries rather than recommended agent responses",
+        "Banking intents do not authorize financial advice or claims",
+        "Import requires attribution; no rows are bundled in this repository"
+      ],
+      "metadataVerifiedAt": "2026-07-13T00:00:00.000Z",
+      "metadataSource": "Hugging Face Hub connector dataset card metadata"
+    },
+    {
+      "id": "hf-console-ai-it-helpdesk",
+      "title": "Console-AI/IT-helpdesk-synthetic-tickets",
+      "url": "https://huggingface.co/datasets/Console-AI/IT-helpdesk-synthetic-tickets",
+      "license": "MIT",
+      "licenseUrl": "https://opensource.org/license/mit/",
+      "provenanceQuality": "low",
+      "contentRisk": "medium",
+      "status": "legal_review",
+      "intendedUse": [
+        "Possible offline IT-ticket scenario expansion"
+      ],
+      "cautions": [
+        "The dataset card declares MIT but provides almost no creation, schema, bias, or quality documentation",
+        "License tag alone is not sufficient for ingestion",
+        "No rows are bundled in this repository"
+      ],
+      "metadataVerifiedAt": "2026-07-13T00:00:00.000Z",
+      "metadataSource": "Hugging Face Hub connector dataset card metadata"
+    },
+    {
+      "id": "hf-ali-alkhars-interviews",
+      "title": "ali-alkhars/interviews",
+      "url": "https://huggingface.co/datasets/ali-alkhars/interviews",
+      "license": "Unknown / not declared",
+      "provenanceQuality": "medium",
+      "contentRisk": "high",
+      "status": "excluded",
+      "intendedUse": [],
+      "cautions": [
+        "The Hub card aggregates multiple upstream repositories and a Kaggle source without declaring a dataset license",
+        "Do not ingest unless every upstream item and transformation is cleared",
+        "No rows are bundled in this repository"
+      ],
+      "metadataVerifiedAt": "2026-07-13T00:00:00.000Z",
+      "metadataSource": "Hugging Face Hub connector dataset card metadata"
+    },
+    {
+      "id": "hf-annomi-sharegpt-conversion",
+      "title": "to-be/annomi-motivational-interviewing-therapy-conversations",
+      "url": "https://huggingface.co/datasets/to-be/annomi-motivational-interviewing-therapy-conversations",
+      "license": "OpenRAIL tag; exact terms require source review",
+      "provenanceQuality": "medium",
+      "contentRisk": "high",
+      "status": "excluded",
+      "intendedUse": [],
+      "cautions": [
+        "Contains sensitive therapy and substance-use conversation material",
+        "The Hub repository is a transformed copy; source and transformation rights must both be reviewed",
+        "Clinical motivational interviewing is not interchangeable with professional-performance coaching",
+        "No rows are bundled in this repository"
+      ],
+      "metadataVerifiedAt": "2026-07-13T00:00:00.000Z",
+      "metadataSource": "Hugging Face Hub connector dataset card metadata"
+    },
+    {
+      "id": "hf-iwslt-ted-talks",
+      "title": "IWSLT/ted_talks_iwslt",
+      "url": "https://huggingface.co/datasets/IWSLT/ted_talks_iwslt",
+      "license": "No clear reusable license declared in Hub metadata",
+      "provenanceQuality": "medium",
+      "contentRisk": "high",
+      "status": "excluded",
+      "intendedUse": [],
+      "cautions": [
+        "Talk transcripts are copyrighted expressive works and the Hub card describes redistribution of TED content",
+        "Do not copy, fine-tune on, or imitate talk transcripts without a separately verified license",
+        "Use newly authored examples of general speaking principles instead",
+        "No rows are bundled in this repository"
+      ],
+      "metadataVerifiedAt": "2026-07-13T00:00:00.000Z",
+      "metadataSource": "Hugging Face Hub connector dataset search metadata"
+    },
+    {
+      "id": "hf-distil-whisper-tedlium",
+      "title": "distil-whisper/tedlium",
+      "url": "https://huggingface.co/datasets/distil-whisper/tedlium",
+      "license": "CC-BY-NC-ND-3.0",
+      "licenseUrl": "https://creativecommons.org/licenses/by-nc-nd/3.0/",
+      "provenanceQuality": "high",
+      "contentRisk": "high",
+      "status": "excluded",
+      "intendedUse": [],
+      "cautions": [
+        "Noncommercial and no-derivatives restrictions conflict with this corpus transformation workflow",
+        "Audio and transcripts are unnecessary for response coaching",
+        "No rows are bundled in this repository"
+      ],
+      "metadataVerifiedAt": "2026-07-13T00:00:00.000Z",
+      "metadataSource": "Hugging Face Hub connector dataset search metadata"
+    },
+    {
+      "id": "hf-life-coaching-conversations",
+      "title": "calvindelima/life_coaching_conversations",
+      "url": "https://huggingface.co/datasets/calvindelima/life_coaching_conversations",
+      "license": "Unknown / not declared",
+      "provenanceQuality": "low",
+      "contentRisk": "high",
+      "status": "excluded",
+      "intendedUse": [],
+      "cautions": [
+        "No license was exposed in Hub search metadata",
+        "No rows are bundled in this repository"
+      ],
+      "metadataVerifiedAt": "2026-07-13T00:00:00.000Z",
+      "metadataSource": "Hugging Face Hub connector dataset search metadata"
+    }
+  ]
+}

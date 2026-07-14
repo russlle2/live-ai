@@ -1,9 +1,11 @@
 import fs from "fs";
 import path from "path";
-import { pool } from "./pool";
+import { fileURLToPath } from "url";
+import { pool } from "./pool.js";
 
 async function run() {
-  const migrationsDir = path.resolve(process.cwd(), "src/db/migrations");
+  // Works from both src/ under tsx and dist/ in the production image.
+  const migrationsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "migrations");
   const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith(".sql")).sort();
   for (const f of files) {
     const full = path.join(migrationsDir, f);

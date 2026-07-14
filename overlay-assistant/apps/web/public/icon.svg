@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Live Rhetoric">
+  <defs>
+    <linearGradient id="bg" x1="70" y1="50" x2="450" y2="470" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#173e31"/>
+      <stop offset="1" stop-color="#07100e"/>
+    </linearGradient>
+    <linearGradient id="line" x1="124" y1="110" x2="388" y2="402" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#77f2bc"/>
+      <stop offset="1" stop-color="#67d7e0"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="116" fill="url(#bg)"/>
+  <rect x="39" y="39" width="434" height="434" rx="92" fill="none" stroke="#a4f5d0" stroke-opacity=".16" stroke-width="4"/>
+  <path d="M133 322V190m0 66h58m45 102V154m0 64h52m45 104V190m0 66h46" fill="none" stroke="url(#line)" stroke-width="30" stroke-linecap="round"/>
+</svg>

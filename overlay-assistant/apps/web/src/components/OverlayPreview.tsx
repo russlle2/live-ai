@@ -1,127 +1,132 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { OverlayStateV1 } from "@overlay-assistant/shared";
 
-/**
- * OverlayPreview v3 — Luxury dark guidance cards
- */
+type SuggestionStage = "idle" | "opening" | "cushion" | "tailored" | "template";
 
-const CONFIDENCE_DISPLAY: Record<string, { icon: string; label: string; cls: string }> = {
-  high:   { icon: "✦", label: "Strong Match",    cls: "guidance-badge--high" },
-  medium: { icon: "◆", label: "Likely Relevant",  cls: "guidance-badge--medium" },
-  low:    { icon: "○", label: "Just a Thought",   cls: "guidance-badge--low" },
+const STAGE_COPY: Record<SuggestionStage, { kicker: string; note: string }> = {
+  idle: {
+    kicker: "Waiting for the other person",
+    note: "A short bridge appears immediately when their turn ends, then the tailored response replaces it."
+  },
+  opening: {
+    kicker: "Start with this exact line",
+    note: "Your complete conversation path is ready below; live guidance will replace this as the other person responds."
+  },
+  cushion: {
+    kicker: "Use this now if you need a beat",
+    note: "This instant bridge is deliberately generic. A tailored response is being prepared."
+  },
+  tailored: {
+    kicker: "Best next response",
+    note: "Keep the meaning, but use your natural voice. Never claim experience you do not have."
+  },
+  template: {
+    kicker: "Fast fallback",
+    note: "AI was unavailable or still working, so this safe prepared response is staying on screen."
+  }
 };
 
 export function OverlayPreview(props: {
   state: OverlayStateV1;
+  stage?: SuggestionStage;
   onShown: (itemId: string) => Promise<void>;
   onApply: (itemId: string) => Promise<void>;
   onDismiss: (itemId: string) => Promise<void>;
   onMuteToggle: () => Promise<void>;
 }) {
-  const { state } = props;
-  const shownSet = useRef(new Set<string>());
-  const [expandedWhy, setExpandedWhy] = useState<string | null>(null);
-
+  const stage = props.stage ?? "idle";
+  const shown = useRef(new Set<string>());
+  const [expanded, setExpanded] = useState<string | null>(null);
   const textSuggestion = useMemo(() => {
-    const t = (state as any)?.text;
-    return typeof t === "string" && t.trim().length ? t.trim() : "";
-  }, [state]);
+    const value = (props.state as OverlayStateV1 & { text?: unknown }).text;
+    return typeof value === "string" ? value.trim() : "";
+  }, [props.state]);
 
   useEffect(() => {
-    for (const item of state.guidance.items) {
-      if (!shownSet.current.has(item.id)) {
-        shownSet.current.add(item.id);
-        props.onShown(item.id).catch(() => undefined);
+    for (const item of props.state.guidance.items) {
+      if (!shown.current.has(item.id)) {
+        shown.current.add(item.id);
+        void props.onShown(item.id);
       }
     }
-  }, [state.guidance.items]);
+  }, [props.state.guidance.items, props.onShown]);
 
-  const isMuted = state.settings.controls.guidanceMuted;
-  const hasFailure = !!state.settings.status?.failureCode;
+  useEffect(() => {
+    const key = `text:${textSuggestion}`;
+    if (textSuggestion && !shown.current.has(key)) {
+      shown.current.add(key);
+      void props.onShown("text_v1");
+    }
+  }, [props.onShown, textSuggestion]);
+
+  const muted = props.state.settings.controls.guidanceMuted;
+  if (muted) {
+    return (
+      <div className="suggestion-empty suggestion-empty--paused">
+        <strong>Guidance is paused</strong>
+        <p>The transcript can continue while response suggestions stay hidden.</p>
+        <button className="secondary-action" onClick={() => void props.onMuteToggle()}>Resume guidance</button>
+      </div>
+    );
+  }
+
+  const guidanceItems = props.state.guidance.items;
+  if (guidanceItems.length > 0) {
+    return (
+      <div className="suggestion-stack" role="region" aria-label="Response suggestions">
+        <div className="suggestion-toolbar">
+          <span>{STAGE_COPY[stage].kicker}</span>
+          <button onClick={() => void props.onMuteToggle()}>Pause</button>
+        </div>
+        {guidanceItems.map((item) => (
+          <article className="suggestion-card" key={item.id}>
+            <p className="suggestion-category">{item.category || "Response"} · {item.confidenceBand} confidence</p>
+            <h2>{item.title}</h2>
+            <blockquote>{item.text}</blockquote>
+            <p className="suggestion-note">{STAGE_COPY[stage].note}</p>
+            <div className="suggestion-actions">
+              <button className="primary-small" onClick={() => void props.onApply(item.id)}>I used this</button>
+              <button className="secondary-action" onClick={() => void props.onDismiss(item.id)}>Clear</button>
+              {item.explanation?.reasons?.length ? (
+                <button className="text-action" onClick={() => setExpanded(expanded === item.id ? null : item.id)} aria-expanded={expanded === item.id}>
+                  {expanded === item.id ? "Hide why" : "Why this"}
+                </button>
+              ) : null}
+            </div>
+            {expanded === item.id && item.explanation?.reasons?.length ? (
+              <div className="suggestion-reason">{item.explanation.reasons.join(" ")}</div>
+            ) : null}
+          </article>
+        ))}
+      </div>
+    );
+  }
+
+  if (textSuggestion) {
+    return (
+      <div className="suggestion-stack" role="region" aria-label="Response suggestion" aria-live="assertive">
+        <div className="suggestion-toolbar">
+          <span>{STAGE_COPY[stage].kicker}</span>
+          <button onClick={() => void props.onMuteToggle()}>Pause</button>
+        </div>
+        <article className={`suggestion-card suggestion-card--${stage}`}>
+          <blockquote>{textSuggestion}</blockquote>
+          <p className="suggestion-note">{STAGE_COPY[stage].note}</p>
+          <div className="suggestion-actions">
+            <button className="primary-small" onClick={() => void props.onApply("text_v1")}>I used this</button>
+            <button className="secondary-action" onClick={() => void props.onDismiss("text_v1")}>Clear</button>
+          </div>
+        </article>
+      </div>
+    );
+  }
 
   return (
-    <div role="region" aria-label="Sales coaching">
-      {/* Controls */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        <button
-          className={`btn-luxury btn-luxury--sm ${isMuted ? "btn-luxury--primary" : "btn-luxury--secondary"}`}
-          onClick={() => props.onMuteToggle()}
-          aria-pressed={isMuted}
-        >
-          {isMuted ? "▐▐  Paused" : "▶  Active"}
-        </button>
-        {hasFailure && (
-          <span style={{ fontSize: 13, color: "var(--color-danger)" }}>
-            ⚠ Processing error — try again
-          </span>
-        )}
-      </div>
-
-      {/* Guidance Cards */}
-      {state.guidance.items.length > 0 ? (
-        <div className="guidance-lux">
-          {state.guidance.items.map((g) => {
-            const conf = CONFIDENCE_DISPLAY[g.confidenceBand] || CONFIDENCE_DISPLAY.medium;
-            const isExpanded = expandedWhy === g.id;
-
-            return (
-              <div key={g.id} className={`guidance-card-lux guidance-card-lux--${g.confidenceBand}`} role="article" aria-label={`Tip: ${g.title}`}>
-                <div className={`guidance-badge ${conf.cls}`}>
-                  <span>{conf.icon}</span> {conf.label}
-                </div>
-
-                <div className="guidance-card-title">{g.title}</div>
-
-                <div className="guidance-card-text" aria-label="Suggested words to say">
-                  {g.text}
-                </div>
-
-                <div className="guidance-card-actions">
-                  <button className="btn-luxury btn-luxury--primary btn-luxury--sm" onClick={() => props.onApply(g.id)}>
-                    ✓ Used it
-                  </button>
-                  <button className="btn-luxury btn-luxury--secondary btn-luxury--sm" onClick={() => props.onDismiss(g.id)}>
-                    Skip
-                  </button>
-                  <button className="why-btn" onClick={() => setExpandedWhy(isExpanded ? null : g.id)} aria-expanded={isExpanded}>
-                    {isExpanded ? "▲ Hide reason" : "▼ Why this?"}
-                  </button>
-                </div>
-
-                {isExpanded && g.explanation && (
-                  <div className="why-panel" aria-label="Explanation">
-                    {g.explanation.reasons?.map((r: string, i: number) => (
-                      <div key={i}>{r}</div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      ) : textSuggestion ? (
-        <div className="guidance-lux">
-          <div className="guidance-card-lux guidance-card-lux--medium" role="article">
-            <div className="guidance-badge guidance-badge--medium">
-              <span>◆</span> Suggestion
-            </div>
-            <div className="guidance-card-title">Quick Tip</div>
-            <div className="guidance-card-text">{textSuggestion}</div>
-            <div className="guidance-card-actions">
-              <button className="btn-luxury btn-luxury--primary btn-luxury--sm" onClick={() => props.onApply("text_v1")}>✓ Used it</button>
-              <button className="btn-luxury btn-luxury--secondary btn-luxury--sm" onClick={() => props.onDismiss("text_v1")}>Skip</button>
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div className="empty-lux">
-          <div style={{ fontSize: 40, marginBottom: 8 }}>✦</div>
-          <div className="empty-lux-title">Ready When You Are</div>
-          <div className="empty-lux-text">
-            Start a conversation and coaching tips will appear here automatically. Take your time.
-          </div>
-        </div>
-      )}
+    <div className="suggestion-empty">
+      <div className="listening-pulse" aria-hidden="true"><i /><i /><i /></div>
+      <strong>{STAGE_COPY.idle.kicker}</strong>
+      <p>{STAGE_COPY.idle.note}</p>
+      <button className="text-action" onClick={() => void props.onMuteToggle()}>Pause guidance</button>
     </div>
   );
 }

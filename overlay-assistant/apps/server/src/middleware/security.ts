@@ -1,12 +1,12 @@
 import type { Request, Response, NextFunction } from "express";
 import { randomUUID } from "node:crypto";
-import { CONFIG } from "../config";
+import { CONFIG } from "../config.js";
 
 const SECURITY_HEADERS: Record<string, string> = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "strict-origin-when-cross-origin",
-  "Permissions-Policy": "camera=(), microphone=(self), geolocation=(), usb=(), payment=()",
+  "Permissions-Policy": "camera=(), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
   "Cross-Origin-Opener-Policy": "same-origin",
   "Cross-Origin-Resource-Policy": "same-site",
   "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
@@ -17,8 +17,10 @@ function buildCsp(): string {
   const webOrigin = CONFIG.webOrigin === "*" ? "'self'" : CONFIG.webOrigin;
   return [
     "default-src 'self'",
-    `connect-src 'self' ${webOrigin} ws: wss:`,
+    `connect-src 'self' ${webOrigin} ws: wss: https://api.openai.com https://huggingface.co https://*.huggingface.co`,
     "img-src 'self' data:",
+    "media-src 'self' blob:",
+    "worker-src 'self' blob:",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com",
     "script-src 'self'",

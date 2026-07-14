@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { withClient } from "../db/pool";
+import { withClient } from "../db/pool.js";
 
 /**
  * Tenant-scoped OAuth credential storage (encrypted at rest).
@@ -17,11 +17,12 @@ const IV_BYTES = 12;
 
 function getEncryptionKey(): Buffer {
   const raw = process.env.CREDENTIAL_ENCRYPTION_KEY ?? "";
-  if (!raw || raw.length < 32) {
-    // In dev, derive a deterministic key — NOT for production
-    return crypto.createHash("sha256").update("dev-only-overlay-key").digest();
+  if (!/^[a-f0-9]{64}$/i.test(raw)) {
+    throw new Error("CREDENTIAL_ENCRYPTION_KEY must be exactly 64 hexadecimal characters");
   }
-  return Buffer.from(raw, "hex");
+  const key = Buffer.from(raw, "hex");
+  if (key.length !== 32) throw new Error("CREDENTIAL_ENCRYPTION_KEY must decode to 32 bytes");
+  return key;
 }
 
 export function encryptCredential(plaintext: string): { encrypted: string; iv: string; tag: string } {
@@ -36,6 +37,9 @@ export function encryptCredential(plaintext: string): { encrypted: string; iv: s
 
 export function decryptCredential(encrypted: string, iv: string, tag: string): string {
   const key = getEncryptionKey();
+  if (!/^[a-f0-9]{24}$/i.test(iv) || !/^[a-f0-9]{32}$/i.test(tag) || !/^(?:[a-f0-9]{2})*$/i.test(encrypted)) {
+    throw new Error("Encrypted credential material is malformed");
+  }
   const decipher = crypto.createDecipheriv(ALGORITHM, key, Buffer.from(iv, "hex"));
   decipher.setAuthTag(Buffer.from(tag, "hex"));
   let dec = decipher.update(encrypted, "hex", "utf8");

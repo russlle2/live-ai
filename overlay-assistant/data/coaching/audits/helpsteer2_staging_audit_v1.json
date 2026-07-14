@@ -1,0 +1,45 @@
+{
+  "schema": "helpsteer2_staging_audit_v1",
+  "source": {
+    "sourceId": "hf-nvidia-helpsteer2",
+    "sourceRevision": "990b2711a36180dd19d9c94b8627844866f8982a",
+    "sourceUrl": "https://huggingface.co/datasets/nvidia/HelpSteer2",
+    "license": "CC-BY-4.0",
+    "inputSha256": "a5cd48600fb7a330cf0ccc8f59051e24e8f236907c379f42eff1ba18da55204b",
+    "stagedArtifactSha256": "a74bdf5a467bf19c5485d4936671549a08eff5d962e0e358700c3a0c9767dc84"
+  },
+  "policy": {
+    "minimumPreferenceStrength": 2,
+    "maximumPerDomain": 250,
+    "liveRetrievalAllowed": false,
+    "requiresHumanContentReview": true
+  },
+  "counts": {
+    "inputRows": 9125,
+    "eligibleBeforeCap": 5,
+    "stagedAfterCap": 5,
+    "byDomain": {
+      "interview": 3,
+      "insurance_sales": 1,
+      "it_support": 0,
+      "inbound_service": 1,
+      "negotiation": 0,
+      "professional_growth": 0
+    },
+    "rejectedByReason": {
+      "weak_preference": 3033,
+      "not_communication_focused": 72,
+      "tied_preference": 2007,
+      "no_professional_domain": 1637,
+      "missing_justification": 583,
+      "length_out_of_bounds": 1268,
+      "instruction_injection": 12,
+      "conversation_history": 400,
+      "external_source_dependent": 36,
+      "non_dialogue_task": 44,
+      "preference_direction_disagreement": 13,
+      "possible_personal_data": 6,
+      "unsafe_or_sensitive": 9
+    }
+  }
+}

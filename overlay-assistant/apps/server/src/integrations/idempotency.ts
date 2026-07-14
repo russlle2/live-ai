@@ -1,4 +1,4 @@
-import { withClient } from "../db/pool";
+import { withClient } from "../db/pool.js";
 
 export async function recordIdempotentWrite(params: {
   tenantId: string;

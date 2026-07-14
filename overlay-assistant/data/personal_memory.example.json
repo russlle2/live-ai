@@ -1,0 +1,25 @@
+{
+  "schema": "personal_memory_v1",
+  "owner": "Your Name",
+  "generatedAt": "2026-01-01T00:00:00.000Z",
+  "facts": [
+    {
+      "id": "example-project",
+      "category": "project",
+      "fact": "Built a customer-facing web project and handled discovery, delivery, and revisions.",
+      "keywords": ["project", "customer", "delivery", "revisions"],
+      "source": {
+        "type": "manual",
+        "ref": "replace-with-a-source-reference",
+        "timestamp": "2026-01-01",
+        "title": "Example evidence"
+      },
+      "confidence": 0.8,
+      "sensitivity": "normal",
+      "temporality": "historical",
+      "userVerified": false,
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:00:00.000Z"
+    }
+  ]
+}

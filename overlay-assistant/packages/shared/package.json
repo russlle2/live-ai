@@ -6,7 +6,8 @@
   "exports": {
     ".": "./dist/index.js",
     "./sanitize": "./dist/sanitize/index.js",
-    "./protocol": "./dist/protocol/index.js"
+    "./protocol": "./dist/protocol/index.js",
+    "./playbook": "./dist/playbook/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

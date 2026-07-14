@@ -1,9 +1,9 @@
 import crypto from "crypto";
 import type { GuidanceControls, GuidanceItemV1 } from "@overlay-assistant/shared";
-import { scoreIntents } from "./intents_v1";
-import { scoreObjections } from "./objections_v1";
-import { TEMPLATE_RULES, templateToGuidanceItem } from "./templates_v1";
-import { confidenceBand, transcriptQualityScore, shouldEmitLowConfidence } from "./confidence_v1";
+import { scoreIntents } from "./intents_v1.js";
+import { scoreObjections } from "./objections_v1.js";
+import { TEMPLATE_RULES, templateToGuidanceItem } from "./templates_v1.js";
+import { confidenceBand, transcriptQualityScore, shouldEmitLowConfidence } from "./confidence_v1.js";
 
 function clamp01(x: number): number {
   return Math.max(0, Math.min(1, x));

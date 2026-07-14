@@ -1,3 +1,7 @@
+# ARCHIVED — predecessor SaaS integration draft
+
+This file is historical design context and does not describe the current personal app.
+
 # Integration Architecture
 
 ## Overview

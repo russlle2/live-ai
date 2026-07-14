@@ -1,10 +1,15 @@
-import type { OverlayMessageV1 } from "./overlay_messages_v1";
+import type { OverlayMessageV1 } from "./overlay_messages_v1.js";
+import type { ConversationSpeakerV1, DeviceRoleV1, SessionProfileV1 } from "../types/session_v1.js";
 export declare const WS_CLIENT_MESSAGE_TYPES_V1: readonly ["start", "flush", "stop", "ping"];
+export type CaptureProvenanceV1 = "dedicated_owner_mic" | "dedicated_browser_tab" | "verified_owner_voice" | "directional_inference" | "manual_label" | "unverified";
 export type WsClientMessageV1 = {
     type: "start";
     session_id: string;
     tenantId: string;
     repId: string;
+    token?: string;
+    deviceRole?: DeviceRoleV1;
+    profile?: SessionProfileV1;
 } | {
     type: "flush";
     session_id: string;
@@ -21,19 +26,59 @@ export type TranscriptFinalV1 = {
     seq: number;
     at: string;
     text: string;
+    speaker: ConversationSpeakerV1;
+    /** Capture origin. A separated remote/system-audio channel is always `lead`. */
+    source: ConversationSpeakerV1;
+    captureProvenance?: CaptureProvenanceV1;
+    attributionConfidence?: number;
+    attributionReason?: string;
+};
+export type CoachingDeliveryV1 = {
+    phase: "cushion" | "provisional" | "final";
+    aiGenerated: boolean;
+    category?: string;
+    confidence?: number;
+    latencyMs?: number;
+    memoryFactIds?: string[];
+    /** Deterministic greeting-to-goodbye stage, when one applies. */
+    playbookStageId?: string;
+};
+export type DeliveryClassificationV1 = "exact" | "paraphrased" | "changed";
+/**
+ * Emitted only after a verified owner (`rep`) final transcript can be paired
+ * with the exact final line that was shown. This powers visible delivery
+ * feedback without putting comparison work on the coaching hot path.
+ */
+export type DeliveryObservationMessageV1 = {
+    type: "delivery_observation";
+    session_id: string;
+    seq: number;
+    at: string;
+    suggestion: string;
+    actual: string;
+    comparison: {
+        classification: DeliveryClassificationV1;
+        similarity: number;
+        lengthRatio: number;
+        note: string;
+    };
+    observationCount: number;
 };
 export type WsServerMessageV1 = {
     type: "ready";
     session_id: string;
     at: string;
+    deviceRole?: DeviceRoleV1;
+    profile?: SessionProfileV1;
 } | {
     type: "pong";
     at: number;
-} | TranscriptFinalV1 | {
+} | TranscriptFinalV1 | DeliveryObservationMessageV1 | {
     type: "overlay_message";
     session_id: string;
     at: string;
     message: OverlayMessageV1;
+    coaching?: CoachingDeliveryV1;
 } | {
     type: "error";
     at: string;

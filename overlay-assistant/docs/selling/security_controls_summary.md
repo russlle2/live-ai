@@ -1,3 +1,7 @@
+# ARCHIVED — predecessor SaaS controls draft
+
+This file is historical design context and is not a certification or current control attestation.
+
 # Security Controls Summary
 
 ## Purpose
@@ -59,7 +63,7 @@ This document summarizes the security controls built into Overlay Assistant, sui
 |---------|---------------|--------|
 | **Docker multi-stage build** | Minimal runtime image (`node:22-slim`), no dev dependencies in production | Available |
 | **Environment-based config** | Secrets via env vars (`OPENAI_API_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, `DATABASE_URL`) — no hardcoded secrets | Enforced |
-| **CORS origin control** | `WEB_ORIGIN` env var restricts allowed origins (defaults to `*` in dev only) | Configurable |
+| **CORS origin control** | Historical draft; the current personal app requires one exact `WEB_ORIGIN` and rejects `*` | Superseded |
 
 ## 7. What's Planned (Not Yet Implemented)
 

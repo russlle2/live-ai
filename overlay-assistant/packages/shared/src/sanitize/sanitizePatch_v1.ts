@@ -55,13 +55,15 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> =>
 
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
 
+const utf8Bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+
 export function sanitizePatch_v1(input: unknown, opts: SanitizeOptionsV1 = {}): SanitizeOk | SanitizeErr {
   const { maxBytes = 8192, maxTextChars = 20_000 } = opts;
 
   // Pre-size gate
   let rawBytes = 0;
   try {
-    rawBytes = Buffer.byteLength(JSON.stringify(input), "utf8");
+    rawBytes = utf8Bytes(input);
   } catch {
     return { ok: false, reason: "not_an_object", bytes: 0 };
   }
@@ -132,7 +134,7 @@ export function sanitizePatch_v1(input: unknown, opts: SanitizeOptionsV1 = {}): 
   }
 
   // Post-sanitize size gate
-  const outBytes = Buffer.byteLength(JSON.stringify(out), "utf8");
+  const outBytes = utf8Bytes(out);
   if (outBytes > maxBytes) return { ok: false, reason: "payload_too_large", bytes: outBytes };
 
   return { ok: true, patch: out, bytes: outBytes, droppedPaths };

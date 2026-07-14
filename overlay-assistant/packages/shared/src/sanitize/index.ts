@@ -1,1 +1,1 @@
-export * from "./sanitizePatch_v1";
+export * from "./sanitizePatch_v1.js";

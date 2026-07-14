@@ -1,5 +1,5 @@
-import type { IntegrationWriteRequest, IntegrationWriteResult } from "./integration_interface";
-import { emitLog } from "../obs/emitLog";
+import type { IntegrationWriteRequest, IntegrationWriteResult } from "./integration_interface.js";
+import { emitLog } from "../obs/emitLog.js";
 
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 500;

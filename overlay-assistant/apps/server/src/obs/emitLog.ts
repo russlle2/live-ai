@@ -1,4 +1,6 @@
-import { insertObsEvent } from "../db/queries";
+import { createHmac, randomBytes } from "node:crypto";
+import { insertObsEvent } from "../db/queries.js";
+import { CONFIG } from "../config.js";
 
 export type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
@@ -23,15 +25,26 @@ const MAX_BYTES = 4096;
 type PendingEvent = Parameters<typeof insertObsEvent>[0];
 let writeBuffer: PendingEvent[] = [];
 let flushScheduled = false;
+let persistencePaused = false;
+const activePersistence = new Set<Promise<void>>();
 const FLUSH_INTERVAL_MS = 50;       // flush every 50ms — imperceptible delay
 const FLUSH_BATCH_MAX = 64;         // flush immediately if buffer hits this
+
+function trackPersistence(write: Promise<void>): Promise<void> {
+  activePersistence.add(write);
+  void write.then(
+    () => activePersistence.delete(write),
+    () => activePersistence.delete(write)
+  );
+  return write;
+}
 
 async function flushBuffer() {
   flushScheduled = false;
   if (writeBuffer.length === 0) return;
   const batch = writeBuffer.splice(0, FLUSH_BATCH_MAX);
   try {
-    await insertObsEventBatch(batch);
+    await trackPersistence(insertObsEventBatch(batch));
   } catch {
     // Telemetry should never crash the hot path
   }
@@ -43,6 +56,28 @@ function scheduleFlush() {
   if (flushScheduled) return;
   flushScheduled = true;
   setTimeout(flushBuffer, FLUSH_INTERVAL_MS);
+}
+
+/** Drop not-yet-persisted telemetry before an explicit owner data purge. */
+export function discardPendingObsEvents(): number {
+  const discarded = writeBuffer.length;
+  writeBuffer = [];
+  return discarded;
+}
+
+/** Pause persistence, discard queued rows, and drain writes already handed to PostgreSQL. */
+export async function beginObsDataPurge(): Promise<number> {
+  persistencePaused = true;
+  const discarded = discardPendingObsEvents();
+  while (activePersistence.size > 0) {
+    await Promise.allSettled([...activePersistence]);
+  }
+  return discarded;
+}
+
+/** Resume persistence only after the owner deletion transaction has completed. */
+export function endObsDataPurge(): void {
+  persistencePaused = false;
 }
 
 /** Batch-insert multiple obs events in one DB round trip */
@@ -58,11 +93,36 @@ async function insertObsEventBatch(events: PendingEvent[]): Promise<void> {
 }
 
 const SENSITIVE_KEY_PATTERN = /(token|secret|password|authorization|cookie|api[_-]?key|auth[_-]?tag|iv|encrypted)/i;
+const SECRET_VALUE_PATTERN = /\b(?:sk|sk-proj)-[a-z0-9_-]{12,}\b|\b(?:bearer|basic)\s+[a-z0-9._~+\/-]+=*|\b(?:password|passcode|api[ _-]?key|access[ _-]?token|refresh[ _-]?token|client[ _-]?secret|private[ _-]?key|one[ -]?time code|otp)\b\s*(?:is|was|:|=)?\s*[^\s,;]{3,}/gi;
+const EMAIL_VALUE_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+const PHONE_VALUE_PATTERN = /\b(?:\+?1[ .-]?)?\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}\b/g;
+const QUERY_SECRET_PATTERN = /([?&](?:token|code|key|secret|signature|sig|auth|credential)=)[^&#\s]+/gi;
+const processRandomLogSalt = randomBytes(32).toString("hex");
+
+function redactStringValue(value: string): string {
+  return value
+    .replace(QUERY_SECRET_PATTERN, "$1[redacted]")
+    .replace(SECRET_VALUE_PATTERN, "[redacted credential]")
+    .replace(EMAIL_VALUE_PATTERN, "[redacted email]")
+    .replace(PHONE_VALUE_PATTERN, "[redacted phone]");
+}
 
 function clampString(s: unknown, max = 200): string {
   const str = typeof s === "string" ? s : String(s ?? "");
-  const noCtl = str.replace(/[\u0000-\u001F\u007F]/g, "");
+  const noCtl = redactStringValue(str).replace(/[\u0000-\u001F\u007F]/g, "");
   return noCtl.length > max ? noCtl.slice(0, max) : noCtl;
+}
+
+/** Stable only for a deployment that keeps the same JWT secret; raw IDs never enter logs. */
+export function opaqueLogIdentifier(kind: "tenant" | "rep" | "session", value?: string): string | undefined {
+  if (!value) return undefined;
+  const digest = createHmac("sha256", CONFIG.jwtSecret || processRandomLogSalt).update(value).digest("hex").slice(0, 20);
+  return `${kind}_${digest}`;
+}
+
+/** Exported for privacy regression tests; every nested string takes the same redaction path. */
+export function sanitizeLogData(value: unknown): unknown {
+  return clampJson(value);
 }
 
 function clampJson(x: any, depth = 0): any {
@@ -113,12 +173,12 @@ export function emitLog(
     traceId: base.traceId,
     spanId: base.spanId,
     parentSpanId: base.parentSpanId,
-    session_id: base.session_id,
-    tenantId: base.tenantId,
-    repId: base.repId,
-    service: base.service,
+    session_id: opaqueLogIdentifier("session", base.session_id),
+    tenantId: opaqueLogIdentifier("tenant", base.tenantId) ?? "tenant_unknown",
+    repId: opaqueLogIdentifier("rep", base.repId) ?? "rep_unknown",
+    service: clampString(base.service, 100),
     eventType: clampString(base.eventType, 120),
-    data: clampJson(base.data ?? {})
+    data: sanitizeLogData(base.data ?? {})
   };
 
   if (bytesLen(env) > MAX_BYTES) {
@@ -139,8 +199,10 @@ export function emitLog(
     at: env.at
   };
 
+  if (persistencePaused) return base.blocking ? Promise.resolve() : undefined;
+
   if (base.blocking) {
-    return insertObsEvent(event);
+    return trackPersistence(insertObsEvent(event));
   }
 
   // Fire-and-forget: buffer the write

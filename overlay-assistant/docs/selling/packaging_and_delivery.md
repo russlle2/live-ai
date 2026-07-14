@@ -1,3 +1,7 @@
+# ARCHIVED — predecessor SaaS packaging draft
+
+This file is historical design context. Live Rhetoric is now a single-owner personal app and is not offered in these packages.
+
 # Packaging & Delivery (how to sell it)
 
 ## Fastest to sell: SaaS + browser extension (recommended)

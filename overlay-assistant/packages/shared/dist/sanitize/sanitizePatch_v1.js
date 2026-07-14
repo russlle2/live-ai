@@ -10,12 +10,13 @@
  */
 const isPlainObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
+const utf8Bytes = (value) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 export function sanitizePatch_v1(input, opts = {}) {
     const { maxBytes = 8192, maxTextChars = 20_000 } = opts;
     // Pre-size gate
     let rawBytes = 0;
     try {
-        rawBytes = Buffer.byteLength(JSON.stringify(input), "utf8");
+        rawBytes = utf8Bytes(input);
     }
     catch {
         return { ok: false, reason: "not_an_object", bytes: 0 };
@@ -98,7 +99,7 @@ export function sanitizePatch_v1(input, opts = {}) {
         return { ok: false, reason: "no_allowed_fields", bytes: rawBytes, detailSafe: "no allowlisted keys" };
     }
     // Post-sanitize size gate
-    const outBytes = Buffer.byteLength(JSON.stringify(out), "utf8");
+    const outBytes = utf8Bytes(out);
     if (outBytes > maxBytes)
         return { ok: false, reason: "payload_too_large", bytes: outBytes };
     return { ok: true, patch: out, bytes: outBytes, droppedPaths };

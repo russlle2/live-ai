@@ -1,6 +1,7 @@
 {
   "name": "overlay-assistant",
   "private": true,
+  "packageManager": "pnpm@11.7.0",
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -10,10 +11,10 @@
     "dev:server": "pnpm -C apps/server dev",
     "dev:web": "pnpm -C apps/web dev",
     "build": "pnpm -r build",
-    "lint": "pnpm -r lint",
-    "test": "pnpm -r test",
-    "typecheck": "pnpm -r typecheck",
-    "check": "pnpm lint && pnpm typecheck && pnpm test",
+    "lint": "pnpm -C packages/shared build && pnpm -r lint",
+    "test": "pnpm -C packages/shared build && pnpm -r test",
+    "typecheck": "pnpm -C packages/shared build && pnpm -r typecheck",
+    "check": "pnpm -C packages/shared build && pnpm -r lint && pnpm -r typecheck && pnpm -r test",
     "format": "prettier -w ."
   },
   "devDependencies": {
