@@ -1,5 +1,10 @@
-const CACHE = "live-rhetoric-shell-v2";
-const SHELL = ["/manifest.webmanifest", "/icon.svg", "/icon-maskable.svg"];
+const CACHE = "live-rhetoric-shell-v3";
+const SHELL = [
+  "/manifest.webmanifest",
+  "/icon.svg",
+  "/icon-maskable.svg",
+  "/audio-frame-processor.js"
+];
 
 async function cacheBuiltShell() {
   const cache = await caches.open(CACHE);

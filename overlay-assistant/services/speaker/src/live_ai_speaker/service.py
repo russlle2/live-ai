@@ -14,6 +14,10 @@ class EnrollmentCancelledError(RuntimeError):
     """Raised when owner deletion invalidates an in-flight enrollment."""
 
 
+class EnrollmentConsistencyError(ValueError):
+    """Raised when a new enrollment sample conflicts with the owner profile."""
+
+
 @dataclass(frozen=True, slots=True)
 class EnrollmentResult:
     accepted: bool
@@ -85,6 +89,7 @@ class SpeakerVerificationService:
         max_payload_bytes: int,
         min_enrollment_samples: int,
         model_revision: str,
+        enrollment_consistency_threshold: float = 0.65,
     ):
         self.embedder = embedder
         self.store = store
@@ -95,6 +100,9 @@ class SpeakerVerificationService:
         self.max_payload_bytes = max_payload_bytes
         self.min_enrollment_samples = min_enrollment_samples
         self.model_revision = model_revision
+        if not 0.3 <= enrollment_consistency_threshold <= 0.95:
+            raise ValueError("enrollment consistency threshold is invalid")
+        self.enrollment_consistency_threshold = enrollment_consistency_threshold
         self._operation_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._profile_generation = 0
@@ -172,6 +180,11 @@ class SpeakerVerificationService:
                 and existing.model_revision == self.model_revision
                 and len(existing.embedding) == len(new_embedding)
             ):
+                consistency = cosine_similarity(existing.embedding, new_embedding)
+                if consistency < self.enrollment_consistency_threshold:
+                    raise EnrollmentConsistencyError(
+                        "owner enrollment sample is inconsistent with the existing profile"
+                    )
                 embedding = merge_owner_embeddings(
                     existing.embedding, existing.sample_count, new_embedding
                 )

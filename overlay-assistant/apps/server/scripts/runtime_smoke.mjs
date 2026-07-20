@@ -24,6 +24,7 @@ const server = spawn(process.execPath, ["dist/index.js"], {
     ALLOW_INSECURE_DEMO_AUTH: "0",
     JWT_SECRET: "runtime-smoke-only-jwt-secret-at-least-32-characters",
     PERSONAL_ACCESS_CODE: smokeAccessCode,
+    PRIVATE_STORAGE_ENCRYPTION_KEY: "runtime-smoke-private-storage-key-at-least-32-characters",
     OPENAI_API_KEY: "",
     GOOGLE_CLIENT_ID: "",
     GOOGLE_CLIENT_SECRET: "",
@@ -31,7 +32,7 @@ const server = spawn(process.execPath, ["dist/index.js"], {
     DATABASE_URL: "postgres://smoke:smoke@127.0.0.1:1/smoke",
     SPEAKER_SERVICE_URL: "http://127.0.0.1:1",
     STT_MOCK: "0",
-    PERSONAL_MEMORY_PATH: path.join(overlayRoot, "data/personal_memory.example.json"),
+    PERSONAL_MEMORY_PATH: path.join(temporary, "personal-memory.json"),
     SESSION_LOG_DIR: temporary,
     WEB_DIST_PATH: path.join(overlayRoot, "apps/web/dist")
   },
@@ -85,7 +86,7 @@ async function waitForServer() {
 async function checkWebSocket(token) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
   const messages = [];
-  await new Promise((resolve, reject) => {
+  const guidanceId = await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("websocket smoke timed out")), 5_000);
     ws.on("open", () => {
       ws.send(JSON.stringify({
@@ -107,22 +108,117 @@ async function checkWebSocket(token) {
       const message = JSON.parse(String(data));
       messages.push(message);
       const ready = messages.some((item) => item.type === "ready");
-      const greeting = messages.some((item) =>
+      const greeting = messages.find((item) =>
         item.type === "overlay_message" &&
         item.coaching?.playbookStageId === "greeting" &&
         item.coaching?.phase === "final" &&
+        typeof item.coaching?.guidanceId === "string" &&
         item.message?.type === "patch" &&
         typeof item.message?.patch?.text === "string" &&
         item.message.patch.text.startsWith("Say:")
       );
       if (ready && greeting) {
         clearTimeout(timeout);
-        resolve();
+        resolve(greeting.coaching.guidanceId);
       }
     });
     ws.on("error", reject);
   });
+  assert.match(String(guidanceId), /^guidance-/);
+  const feedback = await fetch(`${baseUrl}/api/ui-event`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      tenantId: "personal",
+      repId: "owner",
+      sessionId: "runtime-smoke-session",
+      eventType: "suggestion_applied",
+      data: { guidanceId }
+    }),
+    signal: AbortSignal.timeout(2_000)
+  });
+  assert.equal(feedback.ok, true, `guidance feedback returned ${feedback.status}`);
+
+  const interruptionMessage = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("interruption event timed out")), 2_000);
+    const onMessage = (data) => {
+      const message = JSON.parse(String(data));
+      if (message.type !== "interruption_detected") return;
+      clearTimeout(timeout);
+      ws.off("message", onMessage);
+      resolve(message);
+    };
+    ws.on("message", onMessage);
+  });
+  const runtimeEvent = (eventId, sourceId, speaker, turnId) => ({
+    protocolVersion: 2,
+    eventId,
+    sessionId: "runtime-smoke-session",
+    sourceId,
+    sequence: 1,
+    capturedAtMonotonicMs: 100,
+    capturedAt: "2026-07-20T18:00:00.000Z",
+    receivedAt: "2026-07-20T18:00:00.000Z",
+    privacyClass: "private",
+    provenance: "separated_channel",
+    confidence: 1,
+    payload: { type: "speech.started", turnId, speaker }
+  });
+  for (const event of [
+    runtimeEvent("event-owner", "owner-mic", "owner", "turn-owner"),
+    runtimeEvent("event-remote", "remote-tab", "remote", "turn-remote")
+  ]) {
+    const response = await fetch(`${baseUrl}/api/runtime/events`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(event),
+      signal: AbortSignal.timeout(2_000)
+    });
+    assert.equal(response.ok, true, `runtime event returned ${response.status}`);
+  }
+  assert.deepEqual(await interruptionMessage, {
+    type: "interruption_detected",
+    session_id: "runtime-smoke-session",
+    at: "2026-07-20T18:00:00.000Z",
+    interruptedTurnId: "turn-owner",
+    interruptingTurnId: "turn-remote"
+  });
+  await checkSecondAudioHostRejected(token);
   ws.send(JSON.stringify({ type: "stop", session_id: "runtime-smoke-session" }));
+  ws.close();
+}
+
+async function checkSecondAudioHostRejected(token) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error("second audio-host rejection timed out")),
+      2_000
+    );
+    ws.on("open", () => {
+      ws.send(JSON.stringify({
+        type: "start",
+        session_id: "runtime-smoke-session",
+        tenantId: "personal",
+        repId: "owner",
+        deviceRole: "audio_host",
+        token
+      }));
+    });
+    ws.on("message", (data) => {
+      const message = JSON.parse(String(data));
+      if (message.message !== "audio_host_already_connected") return;
+      clearTimeout(timeout);
+      resolve();
+    });
+    ws.on("error", reject);
+  });
   ws.close();
 }
 

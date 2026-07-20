@@ -1,3 +1,9 @@
+import {
+  startAudioFrameCapture,
+  type AudioFrameCapture,
+  type AudioFrameCaptureBackend
+} from "./audioFrameCapture";
+
 export const OWNER_ENROLLMENT_TARGET_SEGMENTS = 3;
 export const OWNER_ENROLLMENT_INSTALLATION_KEY = "live-ai.owner-voice-enrolled.v1";
 
@@ -334,11 +340,12 @@ export type OwnerVoiceCapture = {
   stop: () => void;
   sampleRate: number;
   channelCount: 1 | 2;
+  backend: AudioFrameCaptureBackend;
 };
 
 export type VoiceSegmentChannels = Pick<CleanMultichannelVoiceSegment, "left" | "right" | "channelCount">;
 
-export function startOwnerVoiceSegmentCapture(options: {
+export async function startOwnerVoiceSegmentCapture(options: {
   stream: MediaStream;
   onSegment: (
     segment: Float32Array,
@@ -347,7 +354,7 @@ export function startOwnerVoiceSegmentCapture(options: {
   ) => void;
   onError?: (error: Error) => void;
   maxSegments?: number;
-}): OwnerVoiceCapture {
+}): Promise<OwnerVoiceCapture> {
   const AudioContextCtor = window.AudioContext || (window as typeof window & {
     webkitAudioContext?: typeof AudioContext;
   }).webkitAudioContext;
@@ -359,37 +366,36 @@ export function startOwnerVoiceSegmentCapture(options: {
   // mono-to-stereo duplication from masquerading as directional evidence.
   const reportedChannels = options.stream.getAudioTracks()[0]?.getSettings().channelCount;
   const channelCount: 1 | 2 = typeof reportedChannels === "number" && reportedChannels >= 2 ? 2 : 1;
-  const processor = context.createScriptProcessor(2_048, channelCount, 1);
-  const silentOutput = context.createGain();
-  silentOutput.gain.value = 0;
   const gate = new CleanMultichannelVoiceSegmentGate({
     sampleRate: context.sampleRate,
     maxSegments: options.maxSegments ?? OWNER_ENROLLMENT_TARGET_SEGMENTS
   });
   let stopped = false;
 
-  processor.onaudioprocess = (event) => {
-    if (stopped) return;
-    try {
-      const left = event.inputBuffer.getChannelData(0);
-      const right = channelCount === 2 && event.inputBuffer.numberOfChannels >= 2
-        ? event.inputBuffer.getChannelData(1)
-        : null;
-      const segments = gate.push(left, right);
-      for (const segment of segments) {
-        options.onSegment(segment.mono, context.sampleRate, {
-          left: segment.left,
-          right: segment.right,
-          channelCount: segment.channelCount
-        });
-      }
-    } catch (error) {
-      options.onError?.(error instanceof Error ? error : new Error("Owner-voice capture failed."));
-    }
-  };
-  source.connect(processor);
-  processor.connect(silentOutput);
-  silentOutput.connect(context.destination);
+  let frameCapture: AudioFrameCapture;
+  try {
+    frameCapture = await startAudioFrameCapture({
+      audioContext: context,
+      source,
+      channelCount,
+      onFrame: ({ left, right }) => {
+        if (stopped) return;
+        const segments = gate.push(left, right);
+        for (const segment of segments) {
+          options.onSegment(segment.mono, context.sampleRate, {
+            left: segment.left,
+            right: segment.right,
+            channelCount: segment.channelCount
+          });
+        }
+      },
+      onError: options.onError
+    });
+  } catch (error) {
+    source.disconnect();
+    void context.close();
+    throw error;
+  }
   if (context.state === "suspended") void context.resume().catch((error: unknown) => {
     options.onError?.(error instanceof Error ? error : new Error("Web Audio could not start."));
   });
@@ -397,11 +403,14 @@ export function startOwnerVoiceSegmentCapture(options: {
   const stop = () => {
     if (stopped) return;
     stopped = true;
-    processor.onaudioprocess = null;
+    frameCapture.stop();
     source.disconnect();
-    processor.disconnect();
-    silentOutput.disconnect();
     void context.close();
   };
-  return { stop, sampleRate: context.sampleRate, channelCount };
+  return {
+    stop,
+    sampleRate: context.sampleRate,
+    channelCount,
+    backend: frameCapture.backend
+  };
 }

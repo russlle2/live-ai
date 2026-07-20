@@ -4,13 +4,27 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CONFIG } from "../config.js";
 import type { MemoryFact } from "./personal_memory.js";
-import { clearMemoryFile, rankMemoryFacts, removeGoogleSourceFactsForSource } from "./personal_memory.js";
+import {
+  appendSessionTurn,
+  clearMemoryFile,
+  formatMemoryContext,
+  rankMemoryFacts,
+  readMemoryFile,
+  readSessionTurns,
+  removeGoogleSourceFactsForSource,
+  searchSessionTurns,
+  upsertMemoryFacts
+} from "./personal_memory.js";
 
 const originalMemoryPath = CONFIG.personalMemoryPath;
+const originalSessionLogDir = CONFIG.sessionLogDir;
+const originalPrivateStorageKey = CONFIG.privateStorageEncryptionKey;
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   CONFIG.personalMemoryPath = originalMemoryPath;
+  CONFIG.sessionLogDir = originalSessionLogDir;
+  CONFIG.privateStorageEncryptionKey = originalPrivateStorageKey;
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
     fs.rm(directory, { recursive: true, force: true })
   ));
@@ -31,6 +45,29 @@ function fact(overrides: Partial<MemoryFact> & Pick<MemoryFact, "id" | "category
 }
 
 describe("personal memory retrieval", () => {
+  it("encrypts the personal evidence bank without changing retrieval semantics", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "live-rhetoric-memory-encrypted-"));
+    temporaryDirectories.push(directory);
+    CONFIG.personalMemoryPath = path.join(directory, "personal-memory.json");
+    CONFIG.privateStorageEncryptionKey = "test-personal-memory-key-at-least-32-characters";
+    await upsertMemoryFacts([{
+      id: "private-fact",
+      category: "preference",
+      fact: "Prefers concise and direct answers.",
+      keywords: ["concise"],
+      source: { type: "manual" },
+      confidence: 0.9,
+      sensitivity: "normal",
+      temporality: "durable",
+      userVerified: true
+    }]);
+
+    const raw = await fs.readFile(CONFIG.personalMemoryPath, "utf8");
+    expect(raw).toContain("private_encrypted_json_v1");
+    expect(raw).not.toContain("Prefers concise and direct answers");
+    expect((await readMemoryFile()).facts[0]?.id).toBe("private-fact");
+  });
+
   it("ranks relevant, verified evidence first", () => {
     const result = rankMemoryFacts([
       fact({ id: "generic", category: "preference", fact: "Prefers concise answers." }),
@@ -103,6 +140,46 @@ describe("personal memory retrieval", () => {
     });
 
     expect(result.map((item) => item.id)).toEqual(["safe"]);
+  });
+
+  it("allows review-gated local context in permissive personal mode without exposing restricted facts", () => {
+    const result = rankMemoryFacts([
+      fact({
+        id: "review-context",
+        category: "constraint",
+        fact: "A scheduling constraint that may matter to this conversation.",
+        keywords: ["schedule", "review:needs_review"],
+        sensitivity: "sensitive",
+        userVerified: false
+      }),
+      fact({
+        id: "restricted",
+        category: "constraint",
+        fact: "A restricted fact matching schedule.",
+        keywords: ["schedule"],
+        sensitivity: "restricted",
+        userVerified: true
+      })
+    ], {
+      query: "schedule constraint",
+      profile: { mode: "general" },
+      policy: "personal_permissive"
+    });
+
+    expect(result.map((item) => item.id)).toEqual(["review-context"]);
+  });
+
+  it("labels review-gated evidence explicitly in model context", () => {
+    const context = formatMemoryContext([
+      fact({
+        id: "review-context",
+        category: "constraint",
+        fact: "A tentative scheduling constraint.",
+        keywords: ["review:needs_review"],
+        userVerified: false
+      })
+    ]);
+    expect(context).toContain("review-required");
   });
 
   it("only retrieves sensitive facts after verification and sensitive review are complete", () => {
@@ -180,6 +257,7 @@ describe("personal memory retrieval", () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "live-rhetoric-memory-purge-"));
     temporaryDirectories.push(directory);
     CONFIG.personalMemoryPath = path.join(directory, "personal-memory.json");
+    CONFIG.privateStorageEncryptionKey = "test-memory-purge-key-at-least-32-characters";
     await fs.writeFile(CONFIG.personalMemoryPath, "{not valid json", { mode: 0o600 });
     const crashTemp = `${CONFIG.personalMemoryPath}.old-process.tmp`;
     await fs.writeFile(crashTemp, "private stale data", { mode: 0o600 });
@@ -189,9 +267,78 @@ describe("personal memory retrieval", () => {
       countKnown: false,
       removedTempFiles: 1
     });
-    const after = JSON.parse(await fs.readFile(CONFIG.personalMemoryPath, "utf8"));
-    expect(after).toMatchObject({ schema: "personal_memory_v1", facts: [] });
+    const after = await fs.readFile(CONFIG.personalMemoryPath, "utf8");
+    expect(after).toContain("private_encrypted_json_v1");
+    expect(after).not.toContain("not valid json");
+    expect(await readMemoryFile()).toMatchObject({
+      schema: "personal_memory_v1",
+      facts: []
+    });
     expect((await fs.stat(CONFIG.personalMemoryPath)).mode & 0o777).toBe(0o600);
     await expect(fs.stat(crashTemp)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("encrypted transcript archive", () => {
+  it("retains transcript turns indefinitely without plaintext at rest", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "live-rhetoric-transcripts-"));
+    temporaryDirectories.push(directory);
+    CONFIG.sessionLogDir = directory;
+    CONFIG.privateStorageEncryptionKey = "test-transcript-encryption-key-at-least-32-characters";
+
+    await appendSessionTurn({
+      sessionId: "encrypted-session",
+      speaker: "lead",
+      text: "A private client conversation detail.",
+      at: "2026-07-20T18:00:00.000Z",
+      mode: "general",
+      captureProvenance: "dedicated_browser_tab",
+      attributionConfidence: 1
+    });
+
+    const target = path.join(directory, "encrypted-session.jsonl");
+    const raw = await fs.readFile(target, "utf8");
+    expect(raw).toContain("private_encrypted_jsonl_record_v2");
+    expect(raw).not.toContain("private client conversation detail");
+    await expect(readSessionTurns("encrypted-session")).resolves.toEqual([
+      expect.objectContaining({
+        schema: "session_turn_v1",
+        speaker: "lead",
+        text: "A private client conversation detail."
+      })
+    ]);
+  });
+
+  it("searches decrypted archives locally with source-linked results", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "live-rhetoric-search-"));
+    temporaryDirectories.push(directory);
+    CONFIG.sessionLogDir = directory;
+    CONFIG.privateStorageEncryptionKey = "test-transcript-search-key-at-least-32-characters";
+
+    await appendSessionTurn({
+      sessionId: "client-call",
+      speaker: "lead",
+      text: "The client decided that reliability is the main priority.",
+      at: "2026-07-20T18:00:00.000Z",
+      mode: "general"
+    });
+    await appendSessionTurn({
+      sessionId: "interview",
+      speaker: "lead",
+      text: "The interviewer asked about conflict resolution.",
+      at: "2026-07-20T19:00:00.000Z",
+      mode: "interview"
+    });
+
+    await expect(searchSessionTurns({
+      query: "client reliability priority",
+      limit: 5
+    })).resolves.toEqual([
+      expect.objectContaining({
+        sessionId: "client-call",
+        speaker: "lead",
+        score: expect.any(Number)
+      })
+    ]);
   });
 });

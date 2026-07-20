@@ -13,8 +13,25 @@ function clamp01(x: number): number {
 const CACHE_MAX = 512;
 const arbitrationCache = new Map<string, { decision: ArbitrationDecision; ts: number }>();
 
-function cacheKey(tNorm: string, controls: GuidanceControls): string {
-  return `${tNorm}|${controls.guidanceMode}|${controls.guidanceMuted}|${controls.aiDepth}|${controls.showLowConfidence}`;
+function cacheKey(
+  tNorm: string,
+  controls: GuidanceControls,
+  domainKeywords: string[],
+  speaker: ArbitrationInput["speaker"]
+): string {
+  const normalizedDomain = [...new Set(domainKeywords
+    .map((keyword) => keyword.toLowerCase().trim())
+    .filter(Boolean))]
+    .sort();
+  return sha256Hex(JSON.stringify([
+    tNorm,
+    controls.guidanceMode,
+    controls.guidanceMuted,
+    controls.aiDepth,
+    controls.showLowConfidence,
+    speaker ?? "unknown",
+    normalizedDomain
+  ]));
 }
 
 function pruneCache() {
@@ -61,7 +78,7 @@ export function arbitrateV1(input: ArbitrationInput): ArbitrationDecision {
   const speaker = input.speaker ?? "unknown";
 
   // ── Cache lookup ──
-  const ck = cacheKey(tNorm, input.controls);
+  const ck = cacheKey(tNorm, input.controls, input.domainKeywords, speaker);
   const cached = arbitrationCache.get(ck);
   if (cached && Date.now() - cached.ts < 30_000) {
     return {

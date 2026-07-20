@@ -29,9 +29,10 @@ const STAGE_COPY: Record<SuggestionStage, { kicker: string; note: string }> = {
 export function OverlayPreview(props: {
   state: OverlayStateV1;
   stage?: SuggestionStage;
-  onShown: (itemId: string) => Promise<void>;
-  onApply: (itemId: string) => Promise<void>;
-  onDismiss: (itemId: string) => Promise<void>;
+  guidanceId?: string;
+  onShown: (guidanceId: string) => Promise<void>;
+  onApply: (guidanceId: string) => Promise<void>;
+  onDismiss: (guidanceId: string) => Promise<void>;
   onMuteToggle: () => Promise<void>;
 }) {
   const stage = props.stage ?? "idle";
@@ -44,20 +45,24 @@ export function OverlayPreview(props: {
 
   useEffect(() => {
     for (const item of props.state.guidance.items) {
-      if (!shown.current.has(item.id)) {
-        shown.current.add(item.id);
-        void props.onShown(item.id);
+      const feedbackId = props.guidanceId ?? item.id;
+      const shownKey = `${feedbackId}:${item.id}`;
+      if (!shown.current.has(shownKey)) {
+        shown.current.add(shownKey);
+        void props.onShown(feedbackId);
       }
     }
-  }, [props.state.guidance.items, props.onShown]);
+  }, [props.guidanceId, props.state.guidance.items, props.onShown]);
 
   useEffect(() => {
-    const key = `text:${textSuggestion}`;
+    if (!props.guidanceId) return;
+    const feedbackId = props.guidanceId;
+    const key = `text:${feedbackId}`;
     if (textSuggestion && !shown.current.has(key)) {
       shown.current.add(key);
-      void props.onShown("text_v1");
+      void props.onShown(feedbackId);
     }
-  }, [props.onShown, textSuggestion]);
+  }, [props.guidanceId, props.onShown, textSuggestion]);
 
   const muted = props.state.settings.controls.guidanceMuted;
   if (muted) {
@@ -85,8 +90,8 @@ export function OverlayPreview(props: {
             <blockquote>{item.text}</blockquote>
             <p className="suggestion-note">{STAGE_COPY[stage].note}</p>
             <div className="suggestion-actions">
-              <button className="primary-small" onClick={() => void props.onApply(item.id)}>I used this</button>
-              <button className="secondary-action" onClick={() => void props.onDismiss(item.id)}>Clear</button>
+              <button className="primary-small" onClick={() => void props.onApply(props.guidanceId ?? item.id)}>I used this</button>
+              <button className="secondary-action" onClick={() => void props.onDismiss(props.guidanceId ?? item.id)}>Clear</button>
               {item.explanation?.reasons?.length ? (
                 <button className="text-action" onClick={() => setExpanded(expanded === item.id ? null : item.id)} aria-expanded={expanded === item.id}>
                   {expanded === item.id ? "Hide why" : "Why this"}
@@ -113,8 +118,14 @@ export function OverlayPreview(props: {
           <blockquote>{textSuggestion}</blockquote>
           <p className="suggestion-note">{STAGE_COPY[stage].note}</p>
           <div className="suggestion-actions">
-            <button className="primary-small" onClick={() => void props.onApply("text_v1")}>I used this</button>
-            <button className="secondary-action" onClick={() => void props.onDismiss("text_v1")}>Clear</button>
+            <button
+              className="primary-small"
+              disabled={!props.guidanceId}
+              onClick={() => props.guidanceId && void props.onApply(props.guidanceId)}
+            >
+              I used this
+            </button>
+            <button className="secondary-action" onClick={() => void props.onDismiss(props.guidanceId ?? "")}>Clear</button>
           </div>
         </article>
       </div>

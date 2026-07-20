@@ -4,6 +4,8 @@ import path from "node:path";
 import { z } from "zod";
 import type { ScenarioModeV1, SessionProfileV1 } from "@overlay-assistant/shared";
 import { CONFIG } from "../config.js";
+import { PrivateJsonStore } from "../integrations/google/private_store.js";
+import { EncryptedJsonlArchiveV2 } from "../storage/encrypted_jsonl_archive_v2.js";
 
 export const MemoryFactSchema = z.object({
   id: z.string().min(1),
@@ -55,6 +57,36 @@ const MemoryFileSchema = z.object({
 type MemoryFile = z.infer<typeof MemoryFileSchema>;
 let writeQueue = Promise.resolve();
 
+const SessionTurnSchema = z.object({
+  schema: z.literal("session_turn_v1"),
+  sessionId: z.string().min(1).max(240),
+  speaker: z.enum(["rep", "lead", "unknown"]),
+  text: z.string().min(1).max(20_000),
+  at: z.string().max(100),
+  mode: z.enum([
+    "interview",
+    "insurance_sales",
+    "it_support",
+    "inbound_service",
+    "negotiation",
+    "general"
+  ]),
+  captureProvenance: z.string().max(100).optional(),
+  attributionConfidence: z.number().min(0).max(1).optional(),
+  attributionReason: z.string().max(160).optional()
+}).strict();
+
+export type SessionTurn = z.infer<typeof SessionTurnSchema>;
+const sessionArchives = new Map<
+  string,
+  { encryptionKey: string; archive: EncryptedJsonlArchiveV2<SessionTurn> }
+>();
+let personalMemoryStoreCache: {
+  filePath: string;
+  encryptionKey: string;
+  store: PrivateJsonStore<MemoryFile>;
+} | null = null;
+
 function emptyMemory(): MemoryFile {
   return {
     schema: "personal_memory_v1",
@@ -64,34 +96,37 @@ function emptyMemory(): MemoryFile {
   };
 }
 
-async function ensureParent(): Promise<void> {
-  const directory = path.dirname(CONFIG.personalMemoryPath);
-  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-  await fs.chmod(directory, 0o700);
-}
-
 export async function readMemoryFile(): Promise<MemoryFile> {
-  try {
-    const raw = await fs.readFile(CONFIG.personalMemoryPath, "utf8");
-    return MemoryFileSchema.parse(JSON.parse(raw));
-  } catch (error: any) {
-    if (error?.code === "ENOENT") return emptyMemory();
-    throw error;
-  }
+  return personalMemoryStore().read();
 }
 
 async function writeMemoryFile(memory: MemoryFile): Promise<void> {
-  await ensureParent();
   const next = { ...memory, generatedAt: new Date().toISOString() };
-  const tempPath = `${CONFIG.personalMemoryPath}.${process.pid}.tmp`;
-  try {
-    await fs.writeFile(tempPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-    await fs.rename(tempPath, CONFIG.personalMemoryPath);
-    await fs.chmod(CONFIG.personalMemoryPath, 0o600);
-  } catch (error) {
-    await fs.unlink(tempPath).catch(() => undefined);
-    throw error;
+  await personalMemoryStore().write(next);
+}
+
+function personalMemoryStore(): PrivateJsonStore<MemoryFile> {
+  if (CONFIG.privateStorageEncryptionKey.trim().length < 32) {
+    throw new Error("Private storage encryption is not configured");
   }
+  if (
+    personalMemoryStoreCache?.filePath === CONFIG.personalMemoryPath &&
+    personalMemoryStoreCache.encryptionKey === CONFIG.privateStorageEncryptionKey
+  ) {
+    return personalMemoryStoreCache.store;
+  }
+  const store = new PrivateJsonStore(
+    CONFIG.personalMemoryPath,
+    MemoryFileSchema,
+    emptyMemory,
+    CONFIG.privateStorageEncryptionKey
+  );
+  personalMemoryStoreCache = {
+    filePath: CONFIG.personalMemoryPath,
+    encryptionKey: CONFIG.privateStorageEncryptionKey,
+    store
+  };
+  return store;
 }
 
 async function clearMemoryTempFiles(): Promise<number> {
@@ -190,6 +225,7 @@ export async function clearGoogleMemoryFacts(): Promise<{ removed: number; total
 }
 
 export async function clearSessionLogs(): Promise<{ removedFiles: number }> {
+  sessionArchives.clear();
   let entries: Array<{ name: string; isFile: () => boolean }> = [];
   try {
     entries = await fs.readdir(CONFIG.sessionLogDir, { withFileTypes: true });
@@ -294,6 +330,7 @@ export async function retrieveMemoryFacts(params: {
   query: string;
   profile: SessionProfileV1;
   limit?: number;
+  policy?: "strict" | "personal_permissive";
 }): Promise<MemoryFact[]> {
   const memory = await readMemoryFile();
   return rankMemoryFacts(memory.facts, params);
@@ -305,7 +342,12 @@ export async function retrieveMemoryFacts(params: {
  */
 export function rankMemoryFacts(
   facts: MemoryFact[],
-  params: { query: string; profile: SessionProfileV1; limit?: number }
+  params: {
+    query: string;
+    profile: SessionProfileV1;
+    limit?: number;
+    policy?: "strict" | "personal_permissive";
+  }
 ): MemoryFact[] {
   const queryTerms = terms([
     params.query,
@@ -316,15 +358,16 @@ export function rankMemoryFacts(
   ].filter(Boolean).join(" "));
   const boosted = MODE_CATEGORY_BOOST[params.profile.mode] ?? MODE_CATEGORY_BOOST.general;
   const now = Date.now();
+  const policy = params.policy ?? "strict";
 
   return facts
     .filter((fact) => {
       if (fact.sensitivity === "restricted") return false;
-      const requiresReview = fact.keywords.some((keyword) =>
-        /^review:(?:needs_review|low_confidence|sensitive_review|conflicts_with:)/i.test(keyword)
-      );
-      if (fact.sensitivity === "sensitive" && (!fact.userVerified || requiresReview)) return false;
-      if (!fact.userVerified && requiresReview) return false;
+      const requiresReview = memoryFactRequiresReview(fact);
+      if (policy === "strict") {
+        if (fact.sensitivity === "sensitive" && (!fact.userVerified || requiresReview)) return false;
+        if (!fact.userVerified && requiresReview) return false;
+      }
       const validFrom = fact.validFrom ? Date.parse(fact.validFrom) : Number.NaN;
       const validTo = fact.validTo ? Date.parse(fact.validTo) : Number.NaN;
       if (Number.isFinite(validFrom) && validFrom > now) return false;
@@ -340,7 +383,9 @@ export function rankMemoryFacts(
         (boosted.has(fact.category) ? 3 : 0) +
         (fact.userVerified ? 3 : 0) +
         fact.confidence * 2 +
-        (fact.category === "identity" ? 0.5 : 0);
+        (fact.category === "identity" ? 0.5 : 0) -
+        (memoryFactRequiresReview(fact) ? 4 : 0) -
+        (fact.sensitivity === "sensitive" && !fact.userVerified ? 2 : 0);
       return { fact, score };
     })
     .sort((a, b) => b.score - a.score || b.fact.confidence - a.fact.confidence)
@@ -355,9 +400,16 @@ export function formatMemoryContext(facts: MemoryFact[]): string {
       const sourceRef = fact.source.ref?.replace(/\s+/g, " ").slice(0, 160);
       const source = `${fact.source.type}${sourceRef ? `:${sourceRef}` : ""}`;
       const compactFact = fact.fact.replace(/\s+/g, " ").trim().slice(0, 1200);
-      return `- [${fact.id}] ${compactFact} (source ${source}; confidence ${fact.confidence.toFixed(2)}${fact.userVerified ? ", user-verified" : ", not user-verified"})`;
+      const review = memoryFactRequiresReview(fact) ? ", review-required" : "";
+      return `- [${fact.id}] ${compactFact} (source ${source}; confidence ${fact.confidence.toFixed(2)}${fact.userVerified ? ", user-verified" : ", not user-verified"}${review})`;
     })
     .join("\n");
+}
+
+function memoryFactRequiresReview(fact: MemoryFact): boolean {
+  return fact.keywords.some((keyword) =>
+    /^review:(?:needs_review|low_confidence|sensitive_review|conflicts_with:)/i.test(keyword)
+  );
 }
 
 export async function getMemoryStats(): Promise<Record<string, unknown>> {
@@ -387,10 +439,91 @@ export async function appendSessionTurn(params: {
   attributionConfidence?: number;
   attributionReason?: string;
 }): Promise<void> {
-  await fs.mkdir(CONFIG.sessionLogDir, { recursive: true, mode: 0o700 });
-  await fs.chmod(CONFIG.sessionLogDir, 0o700);
-  const safeId = params.sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 120);
+  const turn = SessionTurnSchema.parse({ schema: "session_turn_v1", ...params });
+  await sessionArchive(params.sessionId).append(turn);
+}
+
+export async function readSessionTurns(sessionId: string): Promise<SessionTurn[]> {
+  return sessionArchive(sessionId).readAll();
+}
+
+export type SessionTurnSearchResult = SessionTurn & { score: number };
+
+export async function searchSessionTurns(params: {
+  query: string;
+  limit?: number;
+}): Promise<SessionTurnSearchResult[]> {
+  const query = params.query.normalize("NFKC").trim().slice(0, 500);
+  const queryTerms = terms(query);
+  if (queryTerms.size === 0) return [];
+  const limit = Math.max(1, Math.min(params.limit ?? 20, 100));
+  let entries: Array<{ name: string; isFile: () => boolean }>;
+  try {
+    entries = await fs.readdir(CONFIG.sessionLogDir, { withFileTypes: true });
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    throw error;
+  }
+
+  const ignored = new Set([
+    "delivery_style_observations.jsonl",
+    "style_feature_observations_v2.jsonl"
+  ]);
+  const results: SessionTurnSearchResult[] = [];
+  for (const entry of entries
+    .filter((candidate) =>
+      candidate.isFile() &&
+      candidate.name.endsWith(".jsonl") &&
+      !ignored.has(candidate.name)
+    )
+    .sort((left, right) => left.name.localeCompare(right.name))) {
+    const target = path.join(CONFIG.sessionLogDir, entry.name);
+    const turns = await sessionArchiveForPath(target).readAll();
+    for (const turn of turns) {
+      const turnTerms = terms(turn.text);
+      const matched = [...queryTerms].filter((term) => turnTerms.has(term)).length;
+      if (matched === 0) continue;
+      const phraseBonus = turn.text.toLowerCase().includes(query.toLowerCase()) ? 5 : 0;
+      results.push({
+        ...turn,
+        score: matched * 10 + phraseBonus
+      });
+    }
+  }
+  return results
+    .sort((left, right) =>
+      right.score - left.score ||
+      right.at.localeCompare(left.at) ||
+      left.sessionId.localeCompare(right.sessionId)
+    )
+    .slice(0, limit);
+}
+
+function sessionArchive(sessionId: string): EncryptedJsonlArchiveV2<SessionTurn> {
+  const safeId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 120);
+  if (!safeId) throw new TypeError("sessionId is required");
   const target = path.join(CONFIG.sessionLogDir, `${safeId}.jsonl`);
-  await fs.appendFile(target, `${JSON.stringify({ schema: "session_turn_v1", ...params })}\n`, { mode: 0o600 });
-  await fs.chmod(target, 0o600);
+  return sessionArchiveForPath(target);
+}
+
+function sessionArchiveForPath(
+  target: string
+): EncryptedJsonlArchiveV2<SessionTurn> {
+  const cached = sessionArchives.get(target);
+  if (
+    cached &&
+    cached.encryptionKey === CONFIG.privateStorageEncryptionKey
+  ) {
+    return cached.archive;
+  }
+  const archive = new EncryptedJsonlArchiveV2<SessionTurn>({
+    filePath: target,
+    encryptionKey: CONFIG.privateStorageEncryptionKey,
+    validate: (value) => SessionTurnSchema.parse(value)
+  });
+  sessionArchives.set(target, {
+    encryptionKey: CONFIG.privateStorageEncryptionKey,
+    archive
+  });
+  return archive;
 }

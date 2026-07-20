@@ -10,7 +10,11 @@ from starlette.concurrency import run_in_threadpool
 from . import __version__
 from .audio import AudioValidationError
 from .backend import ModelUnavailableError, TransformersSpeakerEmbedder
-from .service import EnrollmentCancelledError, SpeakerVerificationService
+from .service import (
+    EnrollmentCancelledError,
+    EnrollmentConsistencyError,
+    SpeakerVerificationService,
+)
 from .settings import Settings
 from .store import OwnerProfileStore, ProfileStoreError
 
@@ -26,6 +30,7 @@ verifier = SpeakerVerificationService(
     max_payload_bytes=settings.max_payload_bytes,
     min_enrollment_samples=settings.min_enrollment_samples,
     model_revision=settings.model_revision,
+    enrollment_consistency_threshold=settings.enrollment_consistency_threshold,
 )
 
 app = FastAPI(
@@ -114,6 +119,8 @@ async def _wav_body(request: Request) -> bytes:
 def _translate_error(exc: Exception) -> HTTPException:
     if isinstance(exc, EnrollmentCancelledError):
         return HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, EnrollmentConsistencyError):
+        return HTTPException(status_code=422, detail=str(exc))
     if isinstance(exc, AudioValidationError):
         return HTTPException(status_code=422, detail=str(exc))
     if isinstance(exc, ModelUnavailableError):

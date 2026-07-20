@@ -1,4 +1,5 @@
 import http from "http";
+import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -7,6 +8,14 @@ import cors from "cors";
 import compression from "compression";
 import { WebSocketServer } from "ws";
 import { z } from "zod";
+import {
+  initialConversationStateV2,
+  MIN_STYLE_OBSERVATIONS_V2,
+  parseRuntimeEventV2,
+  reduceConversationStateV2,
+  type ConversationStateV2,
+  type StyleObservationSourceV2
+} from "@overlay-assistant/runtime";
 
 import {
   sanitizePatch_v1,
@@ -38,6 +47,7 @@ import { arbitrateV1 } from "./arbitration/arbitration_v1.js";
 import { getAiCoaching, isAiCoachEnabled } from "./arbitration/ai_coach_v1.js";
 import {
   getDeterministicCushion,
+  selectDeterministicGuidance,
   shouldCoachSpeaker
 } from "./arbitration/live_fallback_v1.js";
 import {
@@ -58,6 +68,7 @@ import {
 import { clearAllTokenUsage, getTenantUsageSummary, getAllTenantUsage, logTokenUsage } from "./middleware/token_usage.js";
 import { applySecurityHeaders, requestContext } from "./middleware/security.js";
 import { isAllowedWebSocketOrigin } from "./middleware/ws_origin.js";
+import { classifyWebSocketBackpressure } from "./middleware/ws_backpressure.js";
 import {
   isDirectLoopbackRequest,
   isSafeLoopbackDemoBinding,
@@ -76,6 +87,7 @@ import {
   readMemoryFile,
   replaceGoogleSourceFacts,
   retrieveMemoryFacts,
+  searchSessionTurns,
   upsertMemoryFacts,
   type MemoryFactInput
 } from "./memory/personal_memory.js";
@@ -83,17 +95,26 @@ import { learnFromConversation } from "./memory/conversation_learning.js";
 import {
   appendDeliveryStyleObservation,
   createDeliveryStyleObservation,
-  MIN_DELIVERY_STYLE_OBSERVATIONS,
-  readRecentDeliveryStyleObservations,
-  scheduleDeliveryStyleLearning,
   type DeliveryStyleObservation
 } from "./memory/delivery_style_learning.js";
+import { SlowStyleLearnerV2 } from "./memory/slow_style_profile_v2.js";
+import { GuidanceFeedbackStoreV2 } from "./session/guidance_feedback_v2.js";
+import { SessionGuidanceV2 } from "./session/session_guidance_v2.js";
+import { SessionDeviceRegistryV2 } from "./session/session_device_registry_v2.js";
 import { createRealtimeTranscriptionClientSecret } from "./openai/realtime_token.js";
-import { getOpenAIClient, openAISafetyIdentifier } from "./openai/client.js";
+import {
+  getCoachingProviderConfig,
+  getOpenAIClient,
+  openAISafetyIdentifier
+} from "./openai/client.js";
 import {
   createSpeakerServiceClient,
   SpeakerServiceError
 } from "./integrations/speaker/speaker_service.js";
+import {
+  LocalSttClient,
+  LocalSttError
+} from "./integrations/local_stt/local_stt_service.js";
 import {
   createGoogleSyncRouter,
   GoogleMemorySync,
@@ -121,6 +142,17 @@ CONFIG.personalAccessCode = authBootstrap.personalAccessCode;
 CONFIG.authAutoBootstrapped = authBootstrap.managed;
 if (CONFIG.googleStorageEncryptionKey.length < 32 && authBootstrap.managed) {
   CONFIG.googleStorageEncryptionKey = authBootstrap.storageEncryptionKey;
+}
+if (CONFIG.privateStorageEncryptionKey.length < 32 && authBootstrap.managed) {
+  CONFIG.privateStorageEncryptionKey = authBootstrap.storageEncryptionKey;
+}
+if (CONFIG.privateStorageEncryptionKey.length < 32 && CONFIG.allowInsecureDemoAuth) {
+  CONFIG.privateStorageEncryptionKey = randomBytes(48).toString("base64url");
+}
+if (CONFIG.privateStorageEncryptionKey.length < 32) {
+  throw new Error(
+    "PRIVATE_STORAGE_ENCRYPTION_KEY must contain at least 32 characters when authentication is environment-managed"
+  );
 }
 if (CONFIG.allowInsecureDemoAuth && !isSafeLoopbackDemoBinding({
   host: CONFIG.host,
@@ -204,6 +236,7 @@ function coachingCorpusStats(examples: CoachingExample[]) {
 }
 
 type PendingDeliverySuggestion = {
+  guidanceId: string;
   text: string;
   leadSeq: number;
   at: string;
@@ -221,6 +254,7 @@ type SessionCtx = {
   lastActivity: number;
   productContext?: ProductContext;
   conversationHistory: ConversationTurn[];
+  runtimeState: ConversationStateV2;
   latestLeadSeq: number;
   mockStarted: boolean;
   learningInFlight: boolean;
@@ -230,16 +264,12 @@ type SessionCtx = {
   completedPlaybookStageIds: ConversationPlaybookStageIdV1[];
   activePlaybookStageId?: ConversationPlaybookStageIdV1;
   lastCoachingMessage?: Extract<WsServerMessageV1, { type: "overlay_message" }>;
+  guidance: SessionGuidanceV2;
   pendingFinalSuggestion?: PendingDeliverySuggestion;
   deliveryStyleObservations: DeliveryStyleObservation[];
-  deliveryLearningInFlight: boolean;
-  deliveryLearningPending: boolean;
-  deliveryLearningPendingForce: boolean;
-  lastDeliveryLearnedCount: number;
 };
 
 const CONVERSATION_LEARNING_TURN_INTERVAL = 6;
-const DELIVERY_STYLE_LEARNING_INTERVAL = 3;
 
 const DEFAULT_CONTROLS: GuidanceControls = {
   guidanceMode: "assist",
@@ -344,108 +374,35 @@ function scheduleConversationLearning(
   });
 }
 
-/**
- * Learn cadence and phrasing outside the live-response path. Stable memory IDs
- * make repeated passes idempotent, while this session gate avoids unnecessary
- * model calls for every individual sentence.
- */
-function scheduleSessionDeliveryStyleLearning(
-  ctx: SessionCtx,
-  options: { force?: boolean } = {}
-): void {
-  if (ctx.dataEpoch !== privateDataEpoch) return;
-  const force = options.force === true;
-  const observationCount = ctx.deliveryStyleObservations.length;
-  const unlearned = observationCount - ctx.lastDeliveryLearnedCount;
-  if (observationCount < MIN_DELIVERY_STYLE_OBSERVATIONS) return;
-  if (!force && unlearned < DELIVERY_STYLE_LEARNING_INTERVAL) return;
-
-  if (ctx.deliveryLearningInFlight) {
-    ctx.deliveryLearningPending = true;
-    ctx.deliveryLearningPendingForce ||= force;
-    return;
-  }
-
-  ctx.deliveryLearningInFlight = true;
-  ctx.lastDeliveryLearnedCount = observationCount;
-  const observations = ctx.deliveryStyleObservations.slice(-8);
-  const learningEpoch = ctx.dataEpoch;
-
-  const finish = () => {
-    ctx.deliveryLearningInFlight = false;
-    const pending = ctx.deliveryLearningPending;
-    const pendingForce = ctx.deliveryLearningPendingForce;
-    ctx.deliveryLearningPending = false;
-    ctx.deliveryLearningPendingForce = false;
-    if (
-      pendingForce ||
-      (pending && ctx.deliveryStyleObservations.length - ctx.lastDeliveryLearnedCount >= DELIVERY_STYLE_LEARNING_INTERVAL)
-    ) {
-      scheduleSessionDeliveryStyleLearning(ctx, { force: pendingForce });
-    }
-  };
-
-  void trackPrivateDataTask(learningEpoch, () => scheduleDeliveryStyleLearning({
-    tenantId: ctx.tenantId,
-    repId: ctx.repId,
-    observations,
-    upsert: async (facts) => learningEpoch === privateDataEpoch
-      ? upsertMemoryFacts(facts)
-      : { inserted: 0, updated: 0, total: 0 },
-    onComplete: (result) => {
-      emitLog({
-        tenantId: ctx.tenantId,
-        repId: ctx.repId,
-        session_id: ctx.sessionId,
-        service: "delivery_style_learning",
-        eventType: "delivery_style_learning_complete",
-        data: {
-          status: result.status,
-          observations: result.observations,
-          acceptedFacts: result.acceptedFacts,
-          inserted: result.inserted,
-          updated: result.updated
-        }
-      });
-      finish();
-    },
-    onError: (error) => {
-      emitLog({
-        tenantId: ctx.tenantId,
-        repId: ctx.repId,
-        session_id: ctx.sessionId,
-        service: "delivery_style_learning",
-        eventType: "delivery_style_learning_error",
-        level: "WARN",
-        data: safeLearningErrorData(error)
-      });
-      finish();
-    }
-  }));
-}
-
 function recordDeliveryStyleObservation(
   ctx: SessionCtx,
   actual: string,
   turnSeq: number,
   at: string
-): void {
-  if (ctx.dataEpoch !== privateDataEpoch) return;
+): StyleObservationSourceV2 {
+  if (ctx.dataEpoch !== privateDataEpoch) return "owner_spontaneous";
   const suggestion = ctx.pendingFinalSuggestion;
-  if (!suggestion || suggestion.leadSeq !== ctx.latestLeadSeq) return;
+  if (!suggestion || suggestion.leadSeq !== ctx.latestLeadSeq) return "owner_spontaneous";
   const suggestionAgeMs = Date.now() - Date.parse(suggestion.at);
   if (!Number.isFinite(suggestionAgeMs) || suggestionAgeMs < 0 || suggestionAgeMs > 10 * 60_000) {
     ctx.pendingFinalSuggestion = undefined;
-    return;
+    guidanceFeedbackStore.clearSession(ctx.sessionId);
+    return "owner_spontaneous";
   }
+  const feedback = guidanceFeedbackStore.takeForOwnerTurn(
+    ctx.sessionId,
+    suggestion.guidanceId
+  );
   ctx.pendingFinalSuggestion = undefined;
+  if (feedback?.status === "ignored") return "owner_spontaneous";
 
   const observation = createDeliveryStyleObservation({
     sessionId: ctx.sessionId,
     suggested: suggestion.text,
     actual,
     observedAt: at,
-    suggestionKind: "final"
+    suggestionKind: "final",
+    feedbackStatus: feedback?.status === "accepted" ? "accepted" : "unmarked"
   });
   ctx.deliveryStyleObservations.push(observation);
 
@@ -467,10 +424,12 @@ function recordDeliveryStyleObservation(
   broadcast(ctx.sessionId, {
     type: "delivery_observation",
     session_id: ctx.sessionId,
+    guidanceId: suggestion.guidanceId,
     seq: turnSeq,
     at,
     suggestion: observation.suggestedExcerpt,
     actual: observation.actualExcerpt,
+    feedbackStatus: observation.feedbackStatus === "accepted" ? "accepted" : "unmarked",
     comparison: {
       classification: observation.comparison.classification,
       similarity: observation.comparison.similarity,
@@ -479,10 +438,29 @@ function recordDeliveryStyleObservation(
     },
     observationCount: ctx.deliveryStyleObservations.length
   });
-  scheduleSessionDeliveryStyleLearning(ctx);
+  return feedback?.status === "accepted" ||
+    observation.comparison.classification === "exact"
+    ? "guidance_accepted"
+    : "guidance_changed";
 }
 
 const app = express();
+const guidanceFeedbackStore = new GuidanceFeedbackStoreV2();
+const sessions = new Map<string, SessionCtx>();
+const socketsBySession = new Map<string, Set<any>>();
+const sessionDevices = new SessionDeviceRegistryV2<any>();
+let totalWsConnections = 0;
+const wsConnectionsByIp = new Map<string, number>();
+const slowStyleLearner = new SlowStyleLearnerV2({
+  directory: CONFIG.sessionLogDir,
+  upsert: upsertMemoryFacts
+});
+const localSttService = new LocalSttClient({
+  baseUrl: CONFIG.localSttBaseUrl,
+  model: CONFIG.localSttModel,
+  apiKey: CONFIG.localSttApiKey,
+  timeoutMs: CONFIG.localSttTimeoutMs
+});
 const speakerService = createSpeakerServiceClient({
   // Local development needs no repeated setup; Docker overrides this with the
   // private service hostname on the Compose network.
@@ -686,6 +664,48 @@ app.post("/api/auth/login", authRateLimit, (req, res) => {
   return sendOk(res, { token, mode: "jwt", expiresIn: CONFIG.authTokenTtl });
 });
 
+const runtimeEventRateLimit = createRouteRateLimit({
+  key: "runtime_event",
+  max: 600,
+  windowMs: 60_000,
+  keySelector: (req) => req.auth?.repId ?? req.ip ?? "unknown_user"
+});
+
+app.post("/api/runtime/events", requireAuth, runtimeEventRateLimit, asyncRoute(async (req, res) => {
+  let event: ReturnType<typeof parseRuntimeEventV2>;
+  try {
+    event = parseRuntimeEventV2(req.body);
+  } catch {
+    return sendErr(res, 400, "invalid_runtime_event");
+  }
+  const ctx = sessions.get(event.sessionId);
+  if (!ctx) return sendErr(res, 404, "unknown_session");
+  if (!assertTenantAccess(req, ctx.tenantId)) {
+    return sendErr(res, 403, "forbidden", "Tenant mismatch");
+  }
+
+  const previousInterruptionId = ctx.runtimeState.lastInterruption?.eventId;
+  ctx.runtimeState = reduceConversationStateV2(ctx.runtimeState, event);
+  ctx.lastActivity = Date.now();
+  if (event.payload.type === "speech.started") {
+    ctx.guidance.cancel(`${event.payload.speaker}_speech_started`);
+  }
+  const interruption = ctx.runtimeState.lastInterruption;
+  if (interruption && interruption.eventId !== previousInterruptionId) {
+    broadcast(ctx.sessionId, {
+      type: "interruption_detected",
+      session_id: ctx.sessionId,
+      at: interruption.detectedAt,
+      interruptedTurnId: interruption.interruptedTurnId,
+      interruptingTurnId: interruption.interruptingTurnId
+    });
+  }
+  return sendOk(res, {
+    accepted: true,
+    overlapActive: ctx.runtimeState.overlapActive
+  });
+}));
+
 app.post("/api/demo/transcript_final", requireAuth, rateLimitCoaching, asyncRoute(async (req, res) => {
   const parsed = TranscriptFinalInput.safeParse(req.body);
   if (!parsed.success) return sendErr(res, 400, "validation_error", "Invalid transcript payload", parsed.error.flatten());
@@ -734,6 +754,9 @@ const UiEventInput = z.object({
   ]),
   data: z.record(z.any()).optional()
 }).strict();
+const UiGuidanceEventData = z.object({
+  guidanceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,239}$/)
+}).strict();
 
 app.post("/api/ui-event", requireAuth, telemetryRateLimit, asyncRoute(async (req, res) => {
   const parsed = UiEventInput.safeParse(req.body);
@@ -741,11 +764,42 @@ app.post("/api/ui-event", requireAuth, telemetryRateLimit, asyncRoute(async (req
 
   const e = parsed.data;
   if (!assertTenantAccess(req, e.tenantId)) return sendErr(res, 403, "forbidden", "Tenant mismatch");
+  if (req.auth?.repId !== e.repId) return sendErr(res, 403, "forbidden", "Owner mismatch");
+  const session = sessions.get(e.sessionId);
+  if (!session || session.tenantId !== e.tenantId || session.repId !== e.repId) {
+    return sendErr(res, 404, "unknown_session");
+  }
 
   // Hard guard: block obvious transcript leakage fields
   const dataStr = JSON.stringify(e.data ?? {});
   if (/transcript|utterance|raw_text|full_text/i.test(dataStr)) {
     return sendErr(res, 400, "ui_event_contains_disallowed_fields");
+  }
+  if (
+    e.eventType === "suggestion_shown" ||
+    e.eventType === "suggestion_applied" ||
+    e.eventType === "suggestion_dismissed"
+  ) {
+    const guidance = UiGuidanceEventData.safeParse(e.data);
+    if (!guidance.success) return sendErr(res, 400, "guidance_id_required");
+    if (e.eventType === "suggestion_applied" || e.eventType === "suggestion_dismissed") {
+      const marked = guidanceFeedbackStore.mark({
+        sessionId: e.sessionId,
+        guidanceId: guidance.data.guidanceId,
+        status: e.eventType === "suggestion_applied" ? "accepted" : "ignored"
+      });
+      if (!marked) return sendErr(res, 409, "stale_guidance_feedback");
+      if (
+        e.eventType === "suggestion_dismissed" &&
+        session.guidance.currentGuidanceId === guidance.data.guidanceId
+      ) {
+        session.guidance.cancel("owner_dismissed");
+      }
+    }
+  }
+  if (e.eventType === "mute_on" || e.eventType === "mute_off") {
+    session.controls.guidanceMuted = e.eventType === "mute_on";
+    if (session.controls.guidanceMuted) session.guidance.cancel("owner_muted_guidance");
   }
 
   await emitLog({
@@ -769,6 +823,10 @@ app.get("/api/trust/summary", requireAuth, asyncRoute(async (req, res) => {
 }));
 
 const server = http.createServer(app);
+server.headersTimeout = 10_000;
+server.requestTimeout = 30_000;
+server.keepAliveTimeout = 5_000;
+server.maxRequestsPerSocket = 1_000;
 const wss = new WebSocketServer({
   server,
   path: CONFIG.wsPath,
@@ -778,11 +836,6 @@ const wss = new WebSocketServer({
     else done(false, 403, "origin_not_allowed");
   }
 });
-
-const sessions = new Map<string, SessionCtx>();
-const socketsBySession = new Map<string, Set<any>>();
-let totalWsConnections = 0;
-const wsConnectionsByIp = new Map<string, number>();
 
 function closeSocketsForPurge(sockets: Set<any>, reason: string): void {
   for (const socket of sockets) {
@@ -854,7 +907,18 @@ const MemorySearchQuery = z.object({
   company: z.string().max(300).optional(),
   goal: z.string().max(1500).optional(),
   preContext: z.string().max(5000).optional(),
+  policy: z.enum(["strict", "personal_permissive"]).optional().default("personal_permissive"),
   limit: z.coerce.number().int().min(1).max(50).optional().default(12)
+});
+const ArchiveSearchQuery = z.object({
+  q: z.string().trim().min(2).max(500),
+  limit: z.coerce.number().int().min(1).max(100).optional().default(20)
+});
+const archiveSearchRateLimit = createRouteRateLimit({
+  key: "archive_search",
+  max: 60,
+  windowMs: 60_000,
+  keySelector: (req) => req.auth?.repId ?? req.ip ?? "unknown_user"
 });
 
 app.get("/api/memory/stats", requireAuth, asyncRoute(async (_req, res) => {
@@ -877,9 +941,24 @@ app.get("/api/memory/search", requireAuth, asyncRoute(async (req, res) => {
   if (!parsed.success) {
     return sendErr(res, 400, "validation_error", "Invalid memory search", parsed.error.flatten());
   }
-  const { q, limit, ...profile } = parsed.data;
-  const facts = await retrieveMemoryFacts({ query: q, profile, limit });
+  const { q, limit, policy, ...profile } = parsed.data;
+  const facts = await retrieveMemoryFacts({ query: q, profile, limit, policy });
   return sendOk(res, { facts, total: facts.length });
+}));
+
+app.get("/api/archive/search", requireAuth, archiveSearchRateLimit, asyncRoute(async (req, res) => {
+  if (privateDataPurgeActive) {
+    return sendErr(res, 409, "private_data_purge_in_progress");
+  }
+  const parsed = ArchiveSearchQuery.safeParse(req.query);
+  if (!parsed.success) {
+    return sendErr(res, 400, "validation_error", "Invalid archive search", parsed.error.flatten());
+  }
+  const results = await searchSessionTurns({
+    query: parsed.data.q,
+    limit: parsed.data.limit
+  });
+  return sendOk(res, { results, total: results.length });
 }));
 
 app.post("/api/memory/facts", requireAuth, asyncRoute(async (req, res) => {
@@ -899,6 +978,64 @@ app.delete("/api/memory/facts/:id", requireAuth, asyncRoute(async (req, res) => 
     ? sendOk(res, { result })
     : sendErr(res, 404, "memory_fact_not_found");
 }));
+
+const localSttRateLimit = createRouteRateLimit({
+  key: "local_stt",
+  max: 180,
+  windowMs: 60_000,
+  keySelector: (req) => req.auth?.repId ?? req.ip ?? "unknown_user"
+});
+const localSttWavBody = express.raw({
+  type: ["audio/wav", "audio/x-wav"],
+  limit: localSttService.maxAudioBytes
+});
+
+app.get("/api/transcription/status", requireAuth, asyncRoute(async (_req, res) => {
+  const local = await localSttService.status();
+  return sendOk(res, {
+    preferred: local.available ? "local" : CONFIG.openaiApiKey ? "cloud" : "unavailable",
+    local,
+    cloud: {
+      configured: Boolean(CONFIG.openaiApiKey),
+      model: CONFIG.openaiApiKey ? CONFIG.openaiTranscriptionModel : null
+    }
+  });
+}));
+
+app.post(
+  "/api/transcription/local",
+  requireAuth,
+  localSttRateLimit,
+  localSttWavBody,
+  asyncRoute(async (req, res) => {
+    if (!Buffer.isBuffer(req.body)) {
+      return sendErr(res, 415, "audio_wav_required");
+    }
+    try {
+      const audio = new Uint8Array(
+        req.body.buffer,
+        req.body.byteOffset,
+        req.body.byteLength
+      );
+      const result = await localSttService.transcribe(audio, {
+        language: typeof req.query.language === "string"
+          ? req.query.language
+          : "en"
+      });
+      return sendOk(res, result);
+    } catch (error) {
+      if (error instanceof LocalSttError) {
+        return sendErr(
+          res,
+          error.status,
+          "local_stt_error",
+          error.message
+        );
+      }
+      throw error;
+    }
+  })
+);
 
 const speakerEnrollmentRateLimit = createRouteRateLimit({
   key: "speaker_enrollment",
@@ -1005,7 +1142,7 @@ if (googleSync) {
 }
 
 app.get("/api/runtime/status", requireAuth, asyncRoute(async (_req, res) => {
-  const [memory, voice, google, coaching] = await Promise.all([
+  const [memory, voice, google, coaching, transcription] = await Promise.all([
     getMemoryStats(),
     speakerService.health(),
     googleSync?.status() ?? Promise.resolve({
@@ -1026,7 +1163,8 @@ app.get("/api/runtime/status", requireAuth, asyncRoute(async (_req, res) => {
       },
       state: null
     }),
-    coachingCorpusState
+    coachingCorpusState,
+    localSttService.status()
   ]);
   const googleState = google.state;
   const gmailLastSyncAt = googleState?.gmail?.lastSyncAt;
@@ -1035,13 +1173,15 @@ app.get("/api/runtime/status", requireAuth, asyncRoute(async (_req, res) => {
     .filter((value): value is string => Boolean(value))
     .sort()
     .at(-1);
+  const coachingProvider = getCoachingProviderConfig();
 
   return sendOk(res, {
     automation: {
       apiKey: {
-        configured: Boolean(CONFIG.openaiApiKey),
+        configured: Boolean(coachingProvider),
         serverOnly: true,
-        liveModel: CONFIG.openaiModel,
+        provider: coachingProvider?.kind ?? "deterministic",
+        liveModel: coachingProvider?.model ?? "deterministic",
         transcriptionModel: CONFIG.openaiTranscriptionModel
       },
       memory: {
@@ -1058,10 +1198,13 @@ app.get("/api/runtime/status", requireAuth, asyncRoute(async (_req, res) => {
       transcripts: {
         automaticCapture: true,
         automaticLearning: true,
+        localConfigured: transcription.configured,
+        localAvailable: transcription.available,
+        localModel: transcription.model,
         learningIntervalTurns: CONVERSATION_LEARNING_TURN_INTERVAL,
         automaticDeliveryComparison: true,
         automaticSpeakingStyleLearning: true,
-        deliveryLearningMinimumPairs: MIN_DELIVERY_STYLE_OBSERVATIONS
+        deliveryLearningMinimumPairs: MIN_STYLE_OBSERVATIONS_V2
       },
       google: {
         configured: google.configured,
@@ -1110,8 +1253,11 @@ app.delete("/api/private-data", requireAuth, asyncRoute(async (req, res) => {
   const result: Record<string, unknown> = {};
   const warnings: string[] = [];
   const activeSockets = new Set([...socketsBySession.values()].flatMap((items) => [...items]));
+  for (const session of sessions.values()) session.guidance.cancel("private_data_purge");
   sessions.clear();
   socketsBySession.clear();
+  result.connectedDeviceSessions = sessionDevices.clearAll();
+  result.pendingGuidanceFeedback = guidanceFeedbackStore.clearAll();
   closeSocketsForPurge(activeSockets, "owner_private_data_purge");
 
   try {
@@ -1195,6 +1341,7 @@ app.delete("/api/private-data", requireAuth, asyncRoute(async (req, res) => {
         CONFIG.jwtSecret = rotated.jwtSecret;
         CONFIG.personalAccessCode = rotated.personalAccessCode;
         CONFIG.googleStorageEncryptionKey = rotated.storageEncryptionKey;
+        CONFIG.privateStorageEncryptionKey = rotated.storageEncryptionKey;
         googleSync?.rotateStorageEncryptionKey(rotated.storageEncryptionKey);
         result.auth = { rotated: true, storageEncryptionKeyRotated: true };
       } else {
@@ -1227,7 +1374,23 @@ function broadcast(sessionId: string, msg: WsServerMessageV1) {
   // Pre-serialize once for all sockets (avoids repeated JSON.stringify)
   const payload = JSON.stringify(msg);
   for (const ws of set) {
-    if (ws.readyState === ws.OPEN) ws.send(payload);
+    if (ws.readyState !== ws.OPEN) continue;
+    const backpressure = classifyWebSocketBackpressure(ws.bufferedAmount);
+    if (backpressure === "disconnect") {
+      ws.close(1013, "slow_consumer");
+      continue;
+    }
+    if (
+      backpressure === "coalesce" &&
+      (msg.type === "overlay_message" || msg.type === "delivery_observation")
+    ) {
+      continue;
+    }
+    try {
+      ws.send(payload);
+    } catch {
+      ws.close(1011, "send_failed");
+    }
   }
 }
 
@@ -1235,7 +1398,11 @@ function sendCoachingPatch(
   ctx: SessionCtx,
   text: string,
   at: string,
-  coaching: NonNullable<Extract<WsServerMessageV1, { type: "overlay_message" }>["coaching"]>
+  guidanceId: string,
+  coaching: Omit<
+    NonNullable<Extract<WsServerMessageV1, { type: "overlay_message" }>["coaching"]>,
+    "guidanceId" | "feedbackStatus"
+  >
 ): boolean {
   const sanitized = sanitizePatch_v1({ text });
   if (!sanitized.ok) {
@@ -1281,19 +1448,32 @@ function sendCoachingPatch(
     }
   });
 
+  const deliveryCoaching: NonNullable<
+    Extract<WsServerMessageV1, { type: "overlay_message" }>["coaching"]
+  > = {
+    ...coaching,
+    guidanceId,
+    feedbackStatus: "unmarked"
+  };
   const delivery: Extract<WsServerMessageV1, { type: "overlay_message" }> = {
     type: "overlay_message",
     session_id: ctx.sessionId,
     at,
     message: { type: "patch", patch: sanitized.patch },
-    coaching
+    coaching: deliveryCoaching
   };
   ctx.lastCoachingMessage = delivery;
+  guidanceFeedbackStore.register({
+    sessionId: ctx.sessionId,
+    guidanceId,
+    basedOnTurnSeq: ctx.latestLeadSeq
+  });
   if (coaching.playbookStageId) {
     ctx.activePlaybookStageId = coaching.playbookStageId as ConversationPlaybookStageIdV1;
   }
   if (coaching.phase === "final" && typeof sanitized.patch.text === "string") {
     ctx.pendingFinalSuggestion = {
+      guidanceId,
       text: sanitized.patch.text,
       leadSeq: ctx.latestLeadSeq,
       at
@@ -1306,6 +1486,10 @@ function sendCoachingPatch(
 function exactPlaybookLine(say: string): string {
   const trimmed = say.trim().replace(/^say\s*:\s*/i, "");
   return `Say: “${trimmed.replace(/^[“\"]|[”\"]$/g, "")}”`;
+}
+
+function guidanceIsDisabled(ctx: SessionCtx): boolean {
+  return ctx.controls.guidanceMuted || ctx.controls.guidanceMode === "off";
 }
 
 /**
@@ -1329,6 +1513,7 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
   ctx.speaker = speaker;
   const turnSeq = ctx.seq;
   const now = new Date().toISOString();
+  ctx.guidance.cancel("new_transcript_turn");
 
   // Keep a bounded prompt context and a private, local session record.
   ctx.conversationHistory.push({ speaker, text });
@@ -1408,7 +1593,23 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
   });
 
   if (speaker === "rep") {
-    recordDeliveryStyleObservation(ctx, text, turnSeq, now);
+    const styleSource = recordDeliveryStyleObservation(ctx, text, turnSeq, now);
+    void trackPrivateDataTask(ctx.dataEpoch, () => slowStyleLearner.observe({
+      sessionId: ctx.sessionId,
+      turnId: `turn-${turnSeq}`,
+      text,
+      source: styleSource
+    })).catch((error: unknown) => {
+      emitLog({
+        tenantId: ctx.tenantId,
+        repId: ctx.repId,
+        session_id: ctx.sessionId,
+        service: "slow_style_learning",
+        eventType: "slow_style_observation_error",
+        level: "WARN",
+        data: safeLearningErrorData(error)
+      });
+    });
   }
 
   // Speaker identity is fail-closed: owner and unknown turns never trigger
@@ -1416,17 +1617,26 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
   // correction, or repeated calibrated direction in two-person acoustic mode.
   if (!shouldCoachSpeaker(speaker)) return;
   ctx.latestLeadSeq = turnSeq;
-  if (ctx.controls.guidanceMuted || ctx.controls.guidanceMode === "off") return;
+  if (guidanceIsDisabled(ctx)) return;
 
   const playbookStage = selectNextPlaybookStageV1(ctx.profile, {
     transcript: text,
     completedStageIds: ctx.completedPlaybookStageIds
   });
   const playbookFallback = exactPlaybookLine(playbookStage.say);
+  const deterministicFallback = selectDeterministicGuidance(
+    decision.items,
+    playbookFallback
+  );
+  const guidanceLease = ctx.guidance.beginTurn(
+    `turn-${turnSeq}`,
+    CONFIG.coachingFinalDeadlineMs
+  );
+  const guidanceId = guidanceLease.guidanceId;
 
   // Give the user a deterministic line immediately while contextual coaching is
   // generated. This bypasses coalescing by design.
-  sendCoachingPatch(ctx, getDeterministicCushion(ctx.profile.mode), now, {
+  sendCoachingPatch(ctx, getDeterministicCushion(ctx.profile.mode), now, guidanceId, {
     phase: "cushion",
     aiGenerated: false,
     category: "cushion",
@@ -1436,20 +1646,21 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
 
   let aiResult: Awaited<ReturnType<typeof getAiCoaching>> = null;
   const aiEnabled = isAiCoachEnabled();
-  let provisionalSent = false;
   let provisionalTimer: ReturnType<typeof setTimeout> | undefined;
 
   if (aiEnabled) {
     provisionalTimer = setTimeout(() => {
       if (
         ctx.latestLeadSeq !== turnSeq ||
+        !guidanceLease.canPublish() ||
         ctx.controls.guidanceMuted ||
         ctx.controls.guidanceMode === "off"
       ) return;
-      provisionalSent = sendCoachingPatch(
+      sendCoachingPatch(
         ctx,
-        playbookFallback,
+        deterministicFallback,
         new Date().toISOString(),
+        guidanceId,
         {
           phase: "provisional",
           aiGenerated: false,
@@ -1469,10 +1680,14 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
         ctx.profile.goal,
         ...ctx.conversationHistory.slice(-5).map((turn) => turn.text)
       ].filter((value): value is string => Boolean(value)).join(" ");
+      const memoryPolicy = getCoachingProviderConfig()?.kind === "local"
+        ? "personal_permissive" as const
+        : "strict" as const;
       const [memoryFacts, coaching] = await Promise.all([
         retrieveMemoryFacts({
           query: coachingQuery,
-          profile: ctx.profile
+          profile: ctx.profile,
+          policy: memoryPolicy
         }),
         coachingCorpusState
       ]);
@@ -1497,7 +1712,8 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
         productContext: ctx.productContext,
         tenantId: ctx.tenantId,
         repId: ctx.repId,
-        sessionId: ctx.sessionId
+        sessionId: ctx.sessionId,
+        signal: guidanceLease.signal
       });
     } catch (error: unknown) {
       emitLog({
@@ -1512,28 +1728,55 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
     }
   }
 
-  // Do not let a slow response for an older turn replace guidance for a newer one.
-  if (ctx.latestLeadSeq !== turnSeq) {
-    if (provisionalTimer) clearTimeout(provisionalTimer);
+  if (provisionalTimer) clearTimeout(provisionalTimer);
+  const guidanceStatus = guidanceLease.status();
+  const staleOrCancelled =
+    ctx.latestLeadSeq !== turnSeq ||
+    guidanceStatus === "cancelled" ||
+    guidanceStatus === "superseded";
+  // Do not let slow or explicitly cancelled work replace current guidance.
+  if (staleOrCancelled) {
     emitLog({
       tenantId: ctx.tenantId,
       repId: ctx.repId,
       session_id: ctx.sessionId,
       service: "server",
       eventType: "stale_coaching_dropped",
-      data: { turnSeq, latestLeadSeq: ctx.latestLeadSeq }
+      data: { turnSeq, latestLeadSeq: ctx.latestLeadSeq, guidanceStatus }
+    });
+    return;
+  }
+  if (guidanceIsDisabled(ctx)) {
+    ctx.guidance.cancel("guidance_disabled");
+    return;
+  }
+
+  const finalAt = new Date().toISOString();
+  if (guidanceStatus === "expired") {
+    sendCoachingPatch(ctx, deterministicFallback, finalAt, guidanceId, {
+      phase: "final",
+      aiGenerated: false,
+      category: "general",
+      latencyMs: CONFIG.coachingFinalDeadlineMs,
+      memoryFactIds: [],
+      playbookStageId: playbookStage.id
+    });
+    emitLog({
+      tenantId: ctx.tenantId,
+      repId: ctx.repId,
+      session_id: ctx.sessionId,
+      service: "server",
+      eventType: "guidance_deadline_fallback",
+      data: { turnSeq, deadlineMs: CONFIG.coachingFinalDeadlineMs }
     });
     return;
   }
 
-  if (provisionalTimer) clearTimeout(provisionalTimer);
-  if (!aiResult && provisionalSent) return;
-
-  const finalAt = new Date().toISOString();
-  sendCoachingPatch(
+  const delivered = sendCoachingPatch(
     ctx,
-    aiResult?.coaching ?? playbookFallback,
+    aiResult?.coaching ?? deterministicFallback,
     finalAt,
+    guidanceId,
     {
       phase: "final",
       aiGenerated: Boolean(aiResult),
@@ -1544,6 +1787,8 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
       playbookStageId: playbookStage.id
     }
   );
+  if (delivered) ctx.guidance.complete(guidanceLease);
+  else ctx.guidance.cancel("final_patch_rejected");
 }
 
 function startSttMock(ctx: SessionCtx) {
@@ -1708,6 +1953,7 @@ wss.on("connection", (ws, request) => {
         profile: { ...DEFAULT_SESSION_PROFILE_V1 },
         lastActivity: Date.now(),
         conversationHistory: [],
+        runtimeState: initialConversationStateV2(sessionId),
         latestLeadSeq: 0,
         mockStarted: false,
         learningInFlight: false,
@@ -1715,12 +1961,21 @@ wss.on("connection", (ws, request) => {
         learningPending: false,
         learningPendingForce: false,
         completedPlaybookStageIds: [],
-        deliveryStyleObservations: [],
-        deliveryLearningInFlight: false,
-        deliveryLearningPending: false,
-        deliveryLearningPendingForce: false,
-        lastDeliveryLearnedCount: 0
+        guidance: new SessionGuidanceV2(),
+        deliveryStyleObservations: []
       };
+      const deviceAdmission = sessionDevices.register(sessionId, ws, deviceRole);
+      if (!deviceAdmission.ok) {
+        ws.send(JSON.stringify({
+          type: "error",
+          at: new Date().toISOString(),
+          session_id: sessionId,
+          message: deviceAdmission.code,
+          code: "forbidden"
+        } satisfies WsServerMessageV1));
+        ws.close(1008, deviceAdmission.code);
+        return;
+      }
       // A companion joins the live session's existing brief; it must not replace
       // the audio host's mode/company/goal with stale phone-local defaults.
       if (!existing || deviceRole === "audio_host") {
@@ -1748,38 +2003,20 @@ wss.on("connection", (ws, request) => {
 
       if (!existing) {
         const greeting = getInitialPlaybookStageV1(ctx.profile);
-        sendCoachingPatch(ctx, exactPlaybookLine(greeting.say), new Date().toISOString(), {
-          phase: "final",
-          aiGenerated: false,
-          category: "opening",
-          latencyMs: 0,
-          memoryFactIds: [],
-          playbookStageId: greeting.id
-        });
-        // Load only the bounded, already-redacted tail. Two historical pairs
-        // plus the first new pair are enough to trigger cross-session learning.
-        void trackPrivateDataTask(ctx.dataEpoch, () => readRecentDeliveryStyleObservations()).then((recent) => {
-          if (!recent || ctx.dataEpoch !== privateDataEpoch) return;
-          const observationsAlreadyInMemory = [...ctx.deliveryStyleObservations];
-          const byId = new Map(recent.map((item) => [item.id, item]));
-          for (const item of observationsAlreadyInMemory) byId.set(item.id, item);
-          ctx.deliveryStyleObservations = [...byId.values()];
-          ctx.lastDeliveryLearnedCount = Math.max(
-            0,
-            ctx.deliveryStyleObservations.length - 2 - observationsAlreadyInMemory.length
-          );
-          scheduleSessionDeliveryStyleLearning(ctx);
-        }).catch((error: unknown) => {
-          emitLog({
-            tenantId: ctx.tenantId,
-            repId: ctx.repId,
-            session_id: ctx.sessionId,
-            service: "delivery_style_learning",
-            eventType: "delivery_observation_read_error",
-            level: "WARN",
-            data: safeLearningErrorData(error)
-          });
-        });
+        sendCoachingPatch(
+          ctx,
+          exactPlaybookLine(greeting.say),
+          new Date().toISOString(),
+          `guidance-${randomUUID()}`,
+          {
+            phase: "final",
+            aiGenerated: false,
+            category: "opening",
+            latencyMs: 0,
+            memoryFactIds: [],
+            playbookStageId: greeting.id
+          }
+        );
       } else if (ctx.lastCoachingMessage) {
         // A phone companion that joins mid-call should immediately see the same
         // exact line as the audio host instead of waiting for another turn.
@@ -1830,7 +2067,6 @@ wss.on("connection", (ws, request) => {
       const ctx = sessions.get(sessionId);
       if (ctx) {
         scheduleConversationLearning(ctx, { force: true });
-        scheduleSessionDeliveryStyleLearning(ctx, { force: true });
       }
       return;
     }
@@ -1849,13 +2085,16 @@ wss.on("connection", (ws, request) => {
       }
       const ctx = sessions.get(sessionId);
       if (ctx) {
+        ctx.guidance.cancel("session_stopped");
         scheduleConversationLearning(ctx, { force: true });
-        scheduleSessionDeliveryStyleLearning(ctx, { force: true });
       }
       sessions.delete(sessionId);
-      socketsBySession.get(sessionId)?.delete(ws);
+      sessionDevices.clearSession(sessionId);
+      const sessionSockets = socketsBySession.get(sessionId);
+      socketsBySession.delete(sessionId);
       clearSessionRateLimit(sessionId);
-      await trackPrivateDataTask(
+      guidanceFeedbackStore.clearSession(sessionId);
+      void trackPrivateDataTask(
         ctx?.dataEpoch ?? privateDataEpoch,
         () => endSession(sessionId)
       ).catch((error: unknown) => {
@@ -1869,7 +2108,9 @@ wss.on("connection", (ws, request) => {
           data: safeLearningErrorData(error)
         });
       });
-      ws.close();
+      for (const client of sessionSockets ?? []) {
+        if (client.readyState === client.OPEN) client.close(1000, "session_stopped");
+      }
       return;
     }
 
@@ -1900,11 +2141,12 @@ wss.on("connection", (ws, request) => {
     // Clean up socket from all session sets
     for (const [sid, socks] of socketsBySession.entries()) {
       socks.delete(ws);
+      sessionDevices.release(sid, ws);
       if (socks.size === 0) {
         const ctx = sessions.get(sid);
         if (ctx) {
+          ctx.guidance.cancel("all_clients_disconnected");
           scheduleConversationLearning(ctx, { force: true });
-          scheduleSessionDeliveryStyleLearning(ctx, { force: true });
         }
         socketsBySession.delete(sid);
       }
@@ -1917,6 +2159,7 @@ app.get("/api/health/metrics", requireAuth, (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const activeSessions = sessions.size;
   const activeConnections = [...socketsBySession.values()].reduce((sum, s) => sum + s.size, 0);
+  const coachingProvider = getCoachingProviderConfig();
   sendOk(res, {
     activeSessions,
     activeConnections,
@@ -1924,18 +2167,21 @@ app.get("/api/health/metrics", requireAuth, (_req, res) => {
     memoryMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
     arbitrationLocus: ARBITRATION_LOCUS,
     aiCoachEnabled: isAiCoachEnabled(),
-    aiModel: CONFIG.openaiModel
+    aiModel: coachingProvider?.model ?? null,
+    aiProvider: coachingProvider?.kind ?? "deterministic"
   });
 });
 
 /* ── AI status endpoint ────────────────────────────────────── */
 app.get("/api/ai-status", requireAuth, (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
+  const coachingProvider = getCoachingProviderConfig();
   sendOk(res, {
     aiCoachEnabled: isAiCoachEnabled(),
-    model: isAiCoachEnabled() ? CONFIG.openaiModel : null,
-    deepModel: isAiCoachEnabled() ? CONFIG.openaiDeepModel : null,
-    transcriptionModel: isAiCoachEnabled() ? CONFIG.openaiTranscriptionModel : null,
+    provider: coachingProvider?.kind ?? "deterministic",
+    model: coachingProvider?.model ?? null,
+    deepModel: CONFIG.openaiApiKey ? CONFIG.openaiDeepModel : null,
+    transcriptionModel: CONFIG.openaiApiKey ? CONFIG.openaiTranscriptionModel : null,
     mode: isAiCoachEnabled() ? "ai" : "deterministic"
   });
 });
@@ -2004,9 +2250,10 @@ const sessionCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [sid, ctx] of sessions.entries()) {
     if (now - ctx.lastActivity > CONFIG.sessionTimeoutMs) {
+      ctx.guidance.cancel("session_timeout");
       scheduleConversationLearning(ctx, { force: true });
-      scheduleSessionDeliveryStyleLearning(ctx, { force: true });
       sessions.delete(sid);
+      sessionDevices.clearSession(sid);
       const socks = socketsBySession.get(sid);
       if (socks) {
         for (const ws of socks) {
@@ -2015,6 +2262,7 @@ const sessionCleanupTimer = setInterval(() => {
         socketsBySession.delete(sid);
       }
       clearSessionRateLimit(sid);
+      guidanceFeedbackStore.clearSession(sid);
       void trackPrivateDataTask(ctx.dataEpoch, () => endSession(sid)).catch(() => {});
       emitLog({
         tenantId: ctx.tenantId, repId: ctx.repId, session_id: ctx.sessionId,
@@ -2038,7 +2286,6 @@ async function gracefulShutdown(signal: string) {
   // Start final learning snapshots without delaying shutdown on a deep-model call.
   for (const ctx of sessions.values()) {
     scheduleConversationLearning(ctx, { force: true });
-    scheduleSessionDeliveryStyleLearning(ctx, { force: true });
   }
   googleSync?.stopBackgroundSync();
 
@@ -2074,7 +2321,8 @@ server.listen(CONFIG.port, CONFIG.host, () => {
   // eslint-disable-next-line no-console
   console.log(`[server] listening on http://${CONFIG.host}:${CONFIG.port}`);
   // eslint-disable-next-line no-console
-  console.log(`[server] WebSocket path: ${CONFIG.wsPath} | AI: ${isAiCoachEnabled() ? CONFIG.openaiModel : "deterministic"} | Locus: ${ARBITRATION_LOCUS}`);
+  const coachingProvider = getCoachingProviderConfig();
+  console.log(`[server] WebSocket path: ${CONFIG.wsPath} | AI: ${coachingProvider ? `${coachingProvider.kind}:${coachingProvider.model}` : "deterministic"} | Locus: ${ARBITRATION_LOCUS}`);
   googleSync?.startBackgroundSync({
     onError: (error) => {
       emitLog({

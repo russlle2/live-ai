@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { MemoryFactInput } from "./personal_memory.js";
 import {
   appendDeliveryStyleObservation,
+  boundDeliveryStyleObservations,
   buildDeliveryStyleLearningInput,
   compareSuggestedToActual,
   createDeliveryStyleObservation,
@@ -19,6 +20,7 @@ import {
 } from "./delivery_style_learning.js";
 
 const temporaryDirectories: string[] = [];
+const styleEncryptionKey = "test-style-observation-encryption-key-at-least-32-characters";
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
@@ -95,6 +97,36 @@ describe("suggestion-to-delivery comparison", () => {
   });
 });
 
+describe("guidance feedback attribution", () => {
+  it("retains accepted/unmarked observations and excludes explicit dismissals", () => {
+    const accepted = createDeliveryStyleObservation({
+      sessionId: "accepted-session",
+      suggested: "Say: I understand. Let me verify that.",
+      actual: "I understand. Let me check that.",
+      feedbackStatus: "accepted"
+    });
+    const ignored = createDeliveryStyleObservation({
+      sessionId: "ignored-session",
+      suggested: "Say: I understand. Let me verify that.",
+      actual: "I want to discuss something else.",
+      feedbackStatus: "ignored"
+    });
+    const unmarked = createDeliveryStyleObservation({
+      sessionId: "unmarked-session",
+      suggested: "Say: I understand. Let me verify that.",
+      actual: "I hear you. Let me verify it."
+    });
+
+    expect(accepted.feedbackStatus).toBe("accepted");
+    expect(unmarked.feedbackStatus).toBe("unmarked");
+    expect(boundDeliveryStyleObservations([accepted, ignored, unmarked])
+      .map((item) => item.sessionRef)).toEqual([
+      "session:accepted-session",
+      "session:unmarked-session"
+    ]);
+  });
+});
+
 describe("private style observation log", () => {
   it("redacts excerpts, sanitizes the session ref, and writes mode 0600", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "delivery-style-"));
@@ -106,12 +138,17 @@ describe("private style observation log", () => {
       actual: "My API key is sk-proj-abcdefghijklmnop."
     });
 
-    await appendDeliveryStyleObservation(item, { filePath: target });
+    await appendDeliveryStyleObservation(item, {
+      filePath: target,
+      encryptionKey: styleEncryptionKey
+    });
     const stored = await fs.readFile(target, "utf8");
     const stat = await fs.stat(target);
 
     expect(item.sessionRef).toBe("session:unsafe_session_id");
     expect(item.redactionsApplied).toBe(true);
+    expect(stored).toContain("private_encrypted_jsonl_record_v2");
+    expect(stored).not.toContain(item.suggestedExcerpt);
     expect(stored).not.toContain("sk-proj-abcdefghijklmnop");
     expect(stat.mode & 0o777).toBe(0o600);
   });
@@ -121,11 +158,18 @@ describe("private style observation log", () => {
     temporaryDirectories.push(directory);
     const target = path.join(directory, "observations.jsonl");
     for (let index = 0; index < 10; index += 1) {
-      await appendDeliveryStyleObservation(observation(index), { filePath: target });
+      await appendDeliveryStyleObservation(observation(index), {
+        filePath: target,
+        encryptionKey: styleEncryptionKey
+      });
     }
     await fs.appendFile(target, "{not-json}\n");
 
-    const recent = await readRecentDeliveryStyleObservations({ filePath: target, limit: 99 });
+    const recent = await readRecentDeliveryStyleObservations({
+      filePath: target,
+      limit: 99,
+      encryptionKey: styleEncryptionKey
+    });
 
     expect(recent).toHaveLength(8);
     expect(recent[0]?.sessionRef).toBe("session:session-2");

@@ -7,6 +7,7 @@ Docker Compose 2.24+ is required. Before starting the container path, create rep
 ```dotenv
 JWT_SECRET=<32-or-more-random-characters>
 PERSONAL_ACCESS_CODE=<12-or-more-random-characters>
+PRIVATE_STORAGE_ENCRYPTION_KEY=<a-separate-32+-character-random-secret>
 GOOGLE_STORAGE_ENCRYPTION_KEY=<a-different-32+-character-random-secret>
 COMPOSE_WEB_ORIGIN=http://localhost:8080
 APP_BIND_ADDRESS=127.0.0.1
@@ -69,7 +70,7 @@ The stores are split:
 - Compose volume `speaker_private`: owner speaker embedding;
 - Compose volume `speaker_models`: downloaded model cache, not owner enrollment.
 
-Git/Docker exclusions are publication controls, not encryption. Google OAuth/cache/cursor files are application-encrypted. The populated environment file/API keys, personal memory, transcripts/style logs, auth state, PostgreSQL directory, and speaker embedding are otherwise plaintext at rest with filesystem/container permissions. Put the Docker host and volumes on encrypted disk/volume storage and send backups only to encrypted owner-controlled storage. Back up the `speaker_private` volume only if retaining the embedding is intentional; otherwise re-enroll after recovery.
+Git/Docker exclusions are publication controls, not encryption. Google state, personal memory, transcript turns, and delivery comparisons are application-encrypted. The populated environment file/API keys, auth state, PostgreSQL directory, numeric style-feature logs, and speaker embedding still rely on filesystem/container permissions and host disk protection. Put the Docker host and volumes on encrypted storage and send backups only to encrypted owner-controlled storage. Back up the `speaker_private` volume only if retaining the embedding is intentional; otherwise re-enroll after recovery.
 
 The speaker model revision and Python lock are fixed, but container base images still use tags rather than immutable image digests. Rebuilds are therefore not fully byte-for-byte supply-chain reproducible until those digests are pinned.
 
@@ -77,7 +78,7 @@ The speaker model revision and Python lock are fixed, but container base images 
 
 Google consent is one time and accepts exactly Gmail read-only and Drive read-only scopes. Encrypted refresh tokens and cursors enable later background sync. Full source bodies are removed from the encrypted cache after extraction, while source-backed facts remain subject to memory gating.
 
-Use **Erase all private data…** and type `ERASE MY PRIVATE DATA` before decommissioning. The app closes live sessions, purges app memory/logs and database metadata, removes Google-derived facts and local Google state, attempts provider revocation, and deletes the speaker enrollment. Because deployment secrets are environment-managed, the endpoint cannot rotate `JWT_SECRET`, `PERSONAL_ACCESS_CODE`, or `GOOGLE_STORAGE_ENCRYPTION_KEY`; rotate them manually afterward. Review warnings and separately expire/delete reverse-proxy logs, container logs, and backups according to their retention policy.
+Use **Erase all private data…** and type `ERASE MY PRIVATE DATA` before decommissioning. The app closes live sessions, purges app memory/logs and database metadata, removes Google-derived facts and local Google state, attempts provider revocation, and deletes the speaker enrollment. Because deployment secrets are environment-managed, the endpoint cannot rotate `JWT_SECRET`, `PERSONAL_ACCESS_CODE`, `PRIVATE_STORAGE_ENCRYPTION_KEY`, or `GOOGLE_STORAGE_ENCRYPTION_KEY`; rotate them manually afterward. Review warnings and separately expire/delete reverse-proxy logs, container logs, and backups according to their retention policy.
 
 ## Operational checks
 

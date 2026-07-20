@@ -4,7 +4,9 @@
 
 For host development, start the server from the workspace and open `http://localhost:5173`. If explicit auth secrets are absent, the server generates owner credentials under `data/private/`; the local laptop UI fetches the pairing code only because the server directly sees a loopback peer. It uses the code for laptop login and shows it so the owner can pair the current phone browser session once. The phone exchanges that code for a time-limited owner JWT and does not attach the code to every request. Re-enter it after browser session storage is cleared or credentials rotate.
 
-For Docker, a reverse proxy, LAN access, or any HTTPS deployment, configure `JWT_SECRET` (32+ characters), `PERSONAL_ACCESS_CODE` (12+ characters), and a separate `GOOGLE_STORAGE_ENCRYPTION_KEY` (32+ characters) before startup. Docker bridge/NAT or proxy traffic may not look like loopback to the server, so container deployments must not depend on the bootstrap endpoint. `ALLOW_INSECURE_DEMO_AUTH=true` disables this protection and is permitted only for a temporary, loopback-only demo.
+For Docker, a reverse proxy, LAN access, or any HTTPS deployment, configure `JWT_SECRET` (32+ characters), `PERSONAL_ACCESS_CODE` (12+ characters), and `PRIVATE_STORAGE_ENCRYPTION_KEY` (32+ characters). Add a separate `GOOGLE_STORAGE_ENCRYPTION_KEY` when Google sync is enabled. Docker bridge/NAT or proxy traffic may not look like loopback to the server, so container deployments must not depend on the bootstrap endpoint. `ALLOW_INSECURE_DEMO_AUTH=true` disables this protection and is permitted only for a temporary, loopback-only demo.
+
+On Windows, run `scripts/setup-local-ai.ps1` once to install and configure Ollama plus the locked faster-whisper service. Live Rhetoric then prefers local GPU transcription and coaching automatically. The first run downloads model weights; later sessions work without a cloud AI connection.
 
 ## Recommended call setup
 
@@ -36,7 +38,7 @@ The generated line is accepted only after a deterministic evidence/safety check.
 
 For each verified remote turn, the server retrieves a bounded set of relevant contrasts from the reviewed 96-example library: a weak structure, a stronger structure, why it works, and domain guardrails. The examples are not claims about the owner. Only eligible personal facts and safe learned style tendencies may shape the final line.
 
-After a final line is delivered and the next verified owner-microphone turn arrives, the app compares suggested and spoken wording. It records whether the line was exact, paraphrased, or changed, then learns repeated sentence-length, cadence, vocabulary, and directness patterns after enough evidence. It does not learn deception, hostility, unsafe steps, or fictional achievements as preferred style.
+After a final line is delivered and the next verified owner-microphone turn arrives, the app compares suggested and spoken wording. Exact comparisons are encrypted for review; automatic learning stores only numeric style features. A profile changes after at least 12 eligible observations across three sessions, rejects contradictory evidence, and excludes accepted model wording and factual corrections. Exact owner wording is not made reusable unless explicitly pinned.
 
 ## Speaker identity
 
@@ -60,10 +62,10 @@ An installed phone PWA can use its foreground microphone for an in-room exchange
 
 ## Memory policy and review
 
-Memory retrieval is automatic for verified remote turns, but storage does not imply prompt eligibility:
+Memory retrieval is automatic for verified remote turns:
 
-- **Normal:** eligible only when no `needs_review`, `low_confidence`, `sensitive_review`, or conflict flag remains.
-- **Sensitive:** eligible only after owner verification and after all review/conflict flags are cleared.
+- **Local personal mode:** normal and sensitive review-gated context can be retrieved with a visible internal qualification and ranking penalty, but cannot become an asserted personal-history claim.
+- **Cloud mode:** normal evidence must be review-clear; sensitive evidence must also be owner-verified.
 - **Restricted:** never included in automatic coaching prompts, even if owner-verified.
 
 Validity dates and relevance are also enforced. Review-gated claims can remain stored so the owner can resolve them without being presented as fact. The app periodically distills completed transcript turns into career/story candidates and learns delivery style asynchronously; conversation-derived employment, education, skill, achievement, project, and career-story claims always require owner review before live use. Unsupported elevated actions/titles are rejected and weak evidence overlap remains quarantined. The live path always reads the local evidence bank and never waits on Gmail/Drive network latency.
@@ -77,13 +79,13 @@ After one Google consent, bounded Gmail/Drive catch-up and incremental sync run 
 All relative paths are resolved from the `overlay-assistant` directory. Runtime files are used even though Git and Docker build context exclude them:
 
 - `data/private/personal_memory.local.json`: personal evidence bank;
-- `data/private/sessions/`: transcript and delivery-style JSONL logs;
+- `data/private/sessions/`: encrypted transcript and delivery-comparison archives plus non-text numeric style features;
 - `data/private/google/`: encrypted OAuth material, cursors, and minimized cache;
 - `data/private/personal_auth.local.json`: host-development managed auth/bootstrap state;
 - `data/private/speaker/owner_embedding.json`: local-service owner embedding;
 - Compose volume `speaker_private`: containerized speaker embedding.
 
-Google state is application-encrypted. The populated environment file/API keys, personal memory, transcript/style logs, managed auth file, and speaker embedding remain plaintext at rest; app-created private stores rely on owner-only file permissions. Use full-disk or encrypted-volume storage and encrypted backups. Protect the Compose `speaker_private` volume too, or choose not to back it up and re-enroll after restoration.
+Google state, personal memory, transcript turns, and delivery comparisons are application-encrypted. The populated environment file/API keys, managed auth file, PostgreSQL data, numeric style-feature logs, and speaker embedding still rely on owner-only file permissions and host storage encryption. Use encrypted backups. Protect the Compose `speaker_private` volume too, or choose not to back it up and re-enroll after restoration.
 
 ## Erasing data
 
@@ -105,7 +107,7 @@ Read the returned warnings. If the speaker service or database was unavailable, 
 - **Phone cannot join:** use the same HTTPS origin and exact session ID. Laptop `localhost` is not reachable as phone `localhost`. Confirm explicit deployment auth values are configured.
 - **Pairing code does not appear in Docker:** expected. The server does not see Docker bridge/NAT traffic as a direct loopback peer; use the explicitly configured `PERSONAL_ACCESS_CODE`.
 - **No microphone permission:** allow the microphone in browser site permissions and reload.
-- **No AI answer:** inspect `/api/ai-status`; cushions and deterministic fallbacks remain available if OpenAI is unavailable.
+- **No AI answer:** inspect `/api/ai-status`; start the configured local Ollama/llama.cpp server or configure cloud OpenAI. Cushions and deterministic fallbacks remain available if both are unavailable.
 - **Wrong speaker label:** stop audio. Restart capture to reset directional calibration, keep both people/device stationary, or disable direction and use source/manual labels. Do not continue in a falsely verified mode.
 - **Google cannot decrypt state:** restore the exact storage encryption key used to create it. If unavailable, purge/reconnect Google; changing the key cannot recover old ciphertext.
 

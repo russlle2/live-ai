@@ -55,6 +55,7 @@ class Settings:
     local_files_only: bool
     device: str
     owner_threshold: float
+    enrollment_consistency_threshold: float
     min_enrollment_samples: int
     sample_rate: int
     min_audio_seconds: float
@@ -87,6 +88,9 @@ class Settings:
             local_files_only=_env_bool("SPEAKER_LOCAL_FILES_ONLY", False),
             device=os.getenv("SPEAKER_DEVICE", "auto").strip().lower(),
             owner_threshold=_env_float("SPEAKER_OWNER_THRESHOLD", 0.90, 0.0, 1.0),
+            enrollment_consistency_threshold=_env_float(
+                "SPEAKER_ENROLLMENT_CONSISTENCY_THRESHOLD", 0.65, 0.3, 0.95
+            ),
             min_enrollment_samples=_env_int(
                 "SPEAKER_MIN_ENROLLMENT_SAMPLES", 3, 2, 10
             ),

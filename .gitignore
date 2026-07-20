@@ -13,6 +13,7 @@ dist/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.venv/
 
 # Personal-only runtime data (the repository is public)
 overlay-assistant/data/private/

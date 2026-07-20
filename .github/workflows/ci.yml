@@ -49,8 +49,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: |
+          pnpm install --frozen-lockfile
+          uv sync --frozen --dev --project services/stt
 
       - name: Typecheck and test
         run: pnpm run check
@@ -65,6 +70,12 @@ jobs:
         run: |
           PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=services/speaker/src python -m unittest discover -s services/speaker/tests -v
           PYTHONDONTWRITEBYTECODE=1 python -m compileall -q -f services/speaker/src services/speaker/tests
+
+      - name: Local transcription unit tests
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 services/stt/.venv/bin/python -m unittest discover -s services/stt/tests -v
+          PYTHONDONTWRITEBYTECODE=1 services/stt/.venv/bin/python -m compileall -q -f services/stt/src services/stt/tests
+          uv lock --check --project services/stt
 
       - name: Assert private data is not tracked
         working-directory: .

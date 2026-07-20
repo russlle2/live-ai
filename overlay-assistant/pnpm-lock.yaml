@@ -22,6 +22,9 @@ importers:
 
   apps/server:
     dependencies:
+      '@overlay-assistant/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
       '@overlay-assistant/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -86,6 +89,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@overlay-assistant/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
       '@overlay-assistant/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -111,6 +117,15 @@ importers:
       vite:
         specifier: ^5.4.2
         version: 5.4.21(@types/node@22.19.11)
+      vitest:
+        specifier: ^2.0.5
+        version: 2.1.9(@types/node@22.19.11)
+
+  packages/runtime:
+    devDependencies:
+      typescript:
+        specifier: ^5.6.2
+        version: 5.9.3
       vitest:
         specifier: ^2.0.5
         version: 2.1.9(@types/node@22.19.11)

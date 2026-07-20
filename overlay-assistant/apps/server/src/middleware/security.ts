@@ -12,6 +12,19 @@ const SECURITY_HEADERS: Record<string, string> = {
   "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
   "Pragma": "no-cache"
 };
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
+export function safeRequestId(
+  value: unknown,
+  fallback: () => string = randomUUID
+): string {
+  if (typeof value === "string" && REQUEST_ID_PATTERN.test(value)) return value;
+  const generated = fallback();
+  if (!REQUEST_ID_PATTERN.test(generated)) {
+    throw new Error("Request ID generator returned an invalid identifier");
+  }
+  return generated;
+}
 
 function buildCsp(): string {
   const webOrigin = CONFIG.webOrigin === "*" ? "'self'" : CONFIG.webOrigin;
@@ -44,7 +57,7 @@ export function applySecurityHeaders(req: Request, res: Response, next: NextFunc
 }
 
 export function requestContext(req: Request, res: Response, next: NextFunction): void {
-  const requestId = String(req.headers["x-request-id"] ?? randomUUID());
+  const requestId = safeRequestId(req.headers["x-request-id"]);
   res.setHeader("X-Request-Id", requestId);
   (req as Request & { requestId?: string }).requestId = requestId;
   next();

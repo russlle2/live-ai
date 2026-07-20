@@ -175,11 +175,19 @@ export const CONFIG = {
   openaiApiKey: process.env.OPENAI_API_KEY ?? "",
   openaiModel: process.env.OPENAI_LIVE_MODEL ?? process.env.OPENAI_MODEL ?? "gpt-5.6-luna",
   openaiDeepModel: process.env.OPENAI_DEEP_MODEL ?? "gpt-5.6-terra",
+  localAiBaseUrl: process.env.LOCAL_AI_BASE_URL ?? "",
+  localAiApiKey: process.env.LOCAL_AI_API_KEY ?? "",
+  localCoachModel: process.env.LOCAL_COACH_MODEL ?? "",
   openaiReasoningEffort: process.env.OPENAI_REASONING_EFFORT ?? "none",
   openaiTranscriptionModel: process.env.OPENAI_TRANSCRIPTION_MODEL ?? "gpt-realtime-whisper",
   openaiTranscriptionDelay: process.env.OPENAI_TRANSCRIPTION_DELAY ?? "minimal",
+  localSttBaseUrl: process.env.LOCAL_STT_BASE_URL ?? "",
+  localSttApiKey: process.env.LOCAL_STT_API_KEY ?? "",
+  localSttModel: process.env.LOCAL_STT_MODEL ?? "",
+  localSttTimeoutMs: boundedEnvInteger("LOCAL_STT_TIMEOUT_MS", 15_000, 250, 120_000),
   openaiRequestTimeoutMs: boundedEnvInteger("OPENAI_REQUEST_TIMEOUT_MS", 4500, 250, 120_000),
   coachingProvisionalDelayMs: boundedEnvInteger("COACHING_PROVISIONAL_DELAY_MS", 300, 100, 30_000),
+  coachingFinalDeadlineMs: boundedEnvInteger("COACHING_FINAL_DEADLINE_MS", 1500, 400, 30_000),
   openaiRealtimeTokenTtlSeconds: boundedEnvInteger("OPENAI_REALTIME_TOKEN_TTL_SECONDS", 600, 10, 7200),
   jwtSecret: process.env.JWT_SECRET ?? "",
   personalAccessCode: process.env.PERSONAL_ACCESS_CODE ?? "",
@@ -200,6 +208,10 @@ export const CONFIG = {
   authAutoBootstrapped: false,
   personalMemoryPath: resolveOverlayPath(process.env.PERSONAL_MEMORY_PATH ?? "data/private/personal_memory.local.json"),
   sessionLogDir: resolveOverlayPath(process.env.SESSION_LOG_DIR ?? "data/private/sessions"),
+  privateStorageEncryptionKey:
+    process.env.PRIVATE_STORAGE_ENCRYPTION_KEY ??
+    process.env.GOOGLE_STORAGE_ENCRYPTION_KEY ??
+    "",
   memoryMaxPromptFacts: boundedEnvInteger("MEMORY_MAX_PROMPT_FACTS", 12, 1, 100),
   coachingCorpusPaths: (process.env.COACHING_CORPUS_PATHS ?? process.env.COACHING_CORPUS_PATH ?? defaultCoachingCorpusPaths.join(","))
     .split(",")

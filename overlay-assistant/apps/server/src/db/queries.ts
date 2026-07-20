@@ -1,4 +1,5 @@
 import { withClient } from "./pool.js";
+import { storedTelemetryTenantId } from "../obs/identifiers.js";
 
 export async function upsertSession(params: { sessionId: string; tenantId: string; repId: string; }): Promise<void> {
   const { sessionId, tenantId, repId } = params;
@@ -18,12 +19,63 @@ export async function endSession(sessionId: string): Promise<void> {
   });
 }
 
-export async function insertObsEvent(e: { tenantId: string; repId: string; sessionId?: string; service: string; eventType: string; data: unknown; at?: string; }): Promise<void> {
-  await withClient(async (c) => {
+export type ObsEventInput = {
+  tenantId: string;
+  repId: string;
+  sessionId?: string;
+  service: string;
+  eventType: string;
+  data: unknown;
+  at?: string;
+};
+export type ObsClientRunner = (
+  operation: (client: {
+    query: (text: string, values?: unknown[]) => Promise<unknown>;
+  }) => Promise<void>
+) => Promise<void>;
+
+export async function insertObsEvent(e: ObsEventInput): Promise<void> {
+  await insertObsEvents([e]);
+}
+
+export async function insertObsEvents(
+  events: ObsEventInput[],
+  clientRunner: ObsClientRunner = async (operation) =>
+    withClient(async (client) => operation({
+      query: (text, values) => client.query(text, values)
+    }))
+): Promise<void> {
+  if (events.length === 0) return;
+  const payload = events.map((event) => ({
+    at: event.at ?? null,
+    tenant_id: event.tenantId,
+    rep_id: event.repId,
+    session_id: event.sessionId ?? null,
+    service: event.service,
+    event_type: event.eventType,
+    data: event.data ?? {}
+  }));
+  await clientRunner(async (c) => {
     await c.query(
       `INSERT INTO obs_events(at, tenant_id, rep_id, session_id, service, event_type, data)
-       VALUES (COALESCE($1::timestamptz, now()), $2, $3, $4, $5, $6, $7::jsonb)`,
-      [e.at ?? null, e.tenantId, e.repId, e.sessionId ?? null, e.service, e.eventType, JSON.stringify(e.data ?? {})]
+       SELECT
+         COALESCE(event.at::timestamptz, now()),
+         event.tenant_id,
+         event.rep_id,
+         event.session_id,
+         event.service,
+         event.event_type,
+         event.data
+       FROM jsonb_to_recordset($1::jsonb) AS event(
+         at text,
+         tenant_id text,
+         rep_id text,
+         session_id text,
+         service text,
+         event_type text,
+         data jsonb
+       )`,
+      [JSON.stringify(payload)]
     );
   });
 }
@@ -61,6 +113,7 @@ export function computeTrustScoreV1(x: Omit<TrustSummary, "trustScore">): number
 
 export async function getTrustSummaryForTenant(tenantId: string): Promise<TrustSummary> {
   return withClient(async (c) => {
+    const telemetryTenantId = storedTelemetryTenantId(tenantId);
     const { rows } = await c.query(
       `SELECT
          (now() AT TIME ZONE 'utc')::date AS day,
@@ -74,7 +127,7 @@ export async function getTrustSummaryForTenant(tenantId: string): Promise<TrustS
          SUM(CASE WHEN event_type='undo' THEN 1 ELSE 0 END)::int AS undo
        FROM obs_events
        WHERE tenant_id=$1 AND (at AT TIME ZONE 'utc')::date = (now() AT TIME ZONE 'utc')::date`,
-      [tenantId]
+      [telemetryTenantId]
     );
 
     const r = rows[0] ?? { day: new Date().toISOString().slice(0, 10) };

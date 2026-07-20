@@ -1,6 +1,7 @@
-import { createHmac, randomBytes } from "node:crypto";
-import { insertObsEvent } from "../db/queries.js";
-import { CONFIG } from "../config.js";
+import { insertObsEvent, insertObsEvents } from "../db/queries.js";
+import { opaqueLogIdentifier } from "./identifiers.js";
+
+export { opaqueLogIdentifier } from "./identifiers.js";
 
 export type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
@@ -87,18 +88,21 @@ async function insertObsEventBatch(events: PendingEvent[]): Promise<void> {
     await insertObsEvent(events[0]);
     return;
   }
-  // For multiple events, still use insertObsEvent individually
-  // (a true VALUES-list batch can be added later for even more throughput)
-  await Promise.allSettled(events.map((e) => insertObsEvent(e)));
+  await insertObsEvents(events);
 }
 
 const SENSITIVE_KEY_PATTERN = /(token|secret|password|authorization|cookie|api[_-]?key|auth[_-]?tag|iv|encrypted)/i;
+const SAFE_NUMERIC_METRIC_KEYS = new Set([
+  "promptTokens",
+  "completionTokens",
+  "totalTokens",
+  "cachedTokens",
+  "tokensUsed"
+]);
 const SECRET_VALUE_PATTERN = /\b(?:sk|sk-proj)-[a-z0-9_-]{12,}\b|\b(?:bearer|basic)\s+[a-z0-9._~+\/-]+=*|\b(?:password|passcode|api[ _-]?key|access[ _-]?token|refresh[ _-]?token|client[ _-]?secret|private[ _-]?key|one[ -]?time code|otp)\b\s*(?:is|was|:|=)?\s*[^\s,;]{3,}/gi;
 const EMAIL_VALUE_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const PHONE_VALUE_PATTERN = /\b(?:\+?1[ .-]?)?\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}\b/g;
 const QUERY_SECRET_PATTERN = /([?&](?:token|code|key|secret|signature|sig|auth|credential)=)[^&#\s]+/gi;
-const processRandomLogSalt = randomBytes(32).toString("hex");
-
 function redactStringValue(value: string): string {
   return value
     .replace(QUERY_SECRET_PATTERN, "$1[redacted]")
@@ -111,13 +115,6 @@ function clampString(s: unknown, max = 200): string {
   const str = typeof s === "string" ? s : String(s ?? "");
   const noCtl = redactStringValue(str).replace(/[\u0000-\u001F\u007F]/g, "");
   return noCtl.length > max ? noCtl.slice(0, max) : noCtl;
-}
-
-/** Stable only for a deployment that keeps the same JWT secret; raw IDs never enter logs. */
-export function opaqueLogIdentifier(kind: "tenant" | "rep" | "session", value?: string): string | undefined {
-  if (!value) return undefined;
-  const digest = createHmac("sha256", CONFIG.jwtSecret || processRandomLogSalt).update(value).digest("hex").slice(0, 20);
-  return `${kind}_${digest}`;
 }
 
 /** Exported for privacy regression tests; every nested string takes the same redaction path. */
@@ -135,7 +132,14 @@ function clampJson(x: any, depth = 0): any {
     const out: any = {};
     for (const k of Object.keys(x).slice(0, 50)) {
       const safeKey = clampString(k, 80);
-      out[safeKey] = SENSITIVE_KEY_PATTERN.test(safeKey) ? "[redacted]" : clampJson((x as any)[k], depth + 1);
+      const rawValue = (x as any)[k];
+      const safeNumericMetric =
+        SAFE_NUMERIC_METRIC_KEYS.has(safeKey) &&
+        typeof rawValue === "number" &&
+        Number.isFinite(rawValue);
+      out[safeKey] = SENSITIVE_KEY_PATTERN.test(safeKey) && !safeNumericMetric
+        ? "[redacted]"
+        : clampJson(rawValue, depth + 1);
     }
     return out;
   }

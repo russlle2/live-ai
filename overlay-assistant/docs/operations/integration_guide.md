@@ -43,7 +43,7 @@ After **Connect once**, the worker:
 
 OAuth tokens, pending authorization state, cursors, and source cache are `0600` files inside per-file authenticated AES-256-GCM envelopes. Legacy plaintext files migrate atomically when successfully read with a configured key. The public status response is minimized and does not expose token/account/source content.
 
-Automatic retrieval remains separately gated: normal facts must be review-clear, sensitive facts must be owner-verified and review-clear, and restricted facts never enter coaching prompts.
+Automatic retrieval remains separately gated. Local personal mode may use review-gated normal/sensitive context as explicitly qualified input, while deterministic validation blocks unsupported biography. Cloud mode requires review-clear evidence and verification for sensitive facts. Restricted facts never enter coaching prompts.
 
 Default runtime limits are `GOOGLE_SYNC_BATCH_SIZE=10`, `GOOGLE_SYNC_MAX_PAGES=2`, `GOOGLE_MAX_EXTRACTIONS_PER_RUN=5`, `GOOGLE_DAILY_EXTRACTION_BUDGET=40`, `GOOGLE_MAX_CACHED_SOURCES=1000`, a six-hour background interval, a 15-second abortable request timeout, and bounded JSON/text response bodies. Gmail excludes Spam/Trash by default; Drive restricts its default query to supported Google/text types plus PDF metadata and excludes unsupported binaries. All are bounded configuration values. Runtime status reports metered extraction attempts and cache-capacity use so repeated manual refreshes cannot silently bypass the daily budget.
 

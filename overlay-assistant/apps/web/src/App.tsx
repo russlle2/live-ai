@@ -1,4 +1,6 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import type { RuntimeEventV2 } from "@overlay-assistant/runtime";
 import type {
   CoachingDeliveryV1,
   ConversationPlaybookStageIdV1,
@@ -13,6 +15,7 @@ import type {
 } from "@overlay-assistant/shared";
 import { buildConversationPlaybookV1, DEFAULT_SESSION_PROFILE_V1, SCENARIO_MODES_V1, sanitizePatch_v1 } from "@overlay-assistant/shared";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ArchiveSearchPanel } from "./components/ArchiveSearchPanel";
 import { MemoryReviewPanel } from "./components/MemoryReviewPanel";
 import { OverlayPreview } from "./components/OverlayPreview";
 import { useToast } from "./components/Toast";
@@ -21,11 +24,16 @@ import {
   eraseAllPrivateData,
   getRuntimeAutomationStatus,
   login,
+  postRuntimeEvent,
   postUiEvent,
   runGoogleMemorySync,
   type RuntimeAutomationStatus
 } from "./lib/api";
 import { chooseCushion } from "./lib/cushions";
+import {
+  documentPipSupported,
+  openGuidancePip
+} from "./lib/documentPip";
 import {
   useSeparatedRealtimeTranscription,
   type AudioSource,
@@ -151,6 +159,7 @@ export function App() {
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [overlayState, setOverlayState] = useState<OverlayStateV1>(DEFAULT_STATE);
   const [suggestionStage, setSuggestionStage] = useState<SuggestionStage>("idle");
+  const [activeGuidanceId, setActiveGuidanceId] = useState<string | null>(null);
   const [typedText, setTypedText] = useState("");
   const [typedSpeaker, setTypedSpeaker] = useState<ConversationSpeakerV1>("lead");
   const [interims, setInterims] = useState<Partial<Record<AudioSource, string>>>({});
@@ -161,7 +170,9 @@ export function App() {
   const [sessionStart, setSessionStart] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState("0:00");
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [pipWindow, setPipWindow] = useState<Window | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [archiveSearchOpen, setArchiveSearchOpen] = useState(false);
   const [memoryReviewOpen, setMemoryReviewOpen] = useState(false);
   const [accessCode, setAccessCode] = useState(() => sessionStorage.getItem(ACCESS_CODE_SESSION_KEY) || "");
   const [localBootstrapCode, setLocalBootstrapCode] = useState<string | null>(null);
@@ -179,12 +190,14 @@ export function App() {
   });
 
   const { httpBase, wsUrl } = useMemo(apiLocations, []);
+  const pipSupported = useMemo(() => documentPipSupported(window), []);
   const conversationPlaybook = useMemo(() => buildConversationPlaybookV1(profile), [profile]);
   const { addToast, ToastContainer } = useToast();
   const wsRef = useRef<WebSocket | null>(null);
   const tokenRef = useRef<string | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shouldReconnectRef = useRef(false);
+  const runtimeEventQueueRef = useRef<Promise<void>>(Promise.resolve());
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -362,7 +375,7 @@ export function App() {
 
   const applyOverlayMessage = useCallback((
     message: OverlayMessageV1,
-    coaching?: Pick<CoachingDeliveryV1, "phase" | "aiGenerated" | "playbookStageId">
+    coaching?: Pick<CoachingDeliveryV1, "guidanceId" | "phase" | "aiGenerated" | "playbookStageId">
   ) => {
     if (message.type === "settings") {
       const controls = (message.settings as { controls?: OverlayStateV1["settings"]["controls"] }).controls;
@@ -377,6 +390,7 @@ export function App() {
     }
     if (typeof result.patch.text === "string") {
       setOverlayState((current) => ({ ...current, text: result.patch.text } as OverlayStateV1));
+      if (coaching?.guidanceId) setActiveGuidanceId(coaching.guidanceId);
       setSuggestionStage(
         coaching?.playbookStageId === "greeting" && coaching.phase === "final"
           ? "opening"
@@ -437,6 +451,12 @@ export function App() {
             setDeliveryObservations((current) => [...current, message].slice(-24));
             return;
           }
+          if (message.type === "interruption_detected") {
+            setOverlayState((current) => ({ ...current, text: "" } as OverlayStateV1));
+            setActiveGuidanceId(null);
+            setSuggestionStage("idle");
+            return;
+          }
           if (message.type === "overlay_message") {
             applyOverlayMessage(message.message, message.coaching);
             return;
@@ -472,6 +492,7 @@ export function App() {
 
     if (speaker === "lead") {
       setOverlayState((current) => ({ ...current, text: chooseCushion(profile.mode, text) } as OverlayStateV1));
+      setActiveGuidanceId(null);
       setSuggestionStage("cushion");
     }
 
@@ -522,6 +543,26 @@ export function App() {
     setInterims((current) => ({ ...current, [event.source]: event.text }));
   }, []);
 
+  const handleRuntimeEvent = useCallback((event: RuntimeEventV2) => {
+    if (
+      event.payload.type === "speech.started" &&
+      event.payload.speaker === "remote"
+    ) {
+      setOverlayState((current) => ({ ...current, text: "" } as OverlayStateV1));
+      setActiveGuidanceId(null);
+      setSuggestionStage("idle");
+    }
+    runtimeEventQueueRef.current = runtimeEventQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const token = await ensureAuth();
+        await postRuntimeEvent(event, httpBase, token);
+      })
+      .catch(() => {
+        setError("Live speech-state synchronization was interrupted.");
+      });
+  }, [ensureAuth, httpBase]);
+
   const realtime = useSeparatedRealtimeTranscription({
     enabled: deviceRole === "audio_host" && wsStatus === "ready",
     httpBase,
@@ -529,7 +570,8 @@ export function App() {
     getAuthToken: ensureAuth,
     twoPartyDirectionalMode,
     onFinal: handleRealtimeFinal,
-    onInterim: handleRealtimeInterim
+    onInterim: handleRealtimeInterim,
+    onRuntimeEvent: handleRuntimeEvent
   });
 
   const purgePrivateData = useCallback(async () => {
@@ -550,6 +592,10 @@ export function App() {
       setTranscript([]);
       setDeliveryObservations([]);
       setAutomation(null);
+      setActiveGuidanceId(null);
+      if (pipWindow && !pipWindow.closed) pipWindow.close();
+      setPipWindow(null);
+      setArchiveSearchOpen(false);
       setMemoryReviewOpen(false);
       setAuthToken(null);
       tokenRef.current = null;
@@ -570,7 +616,7 @@ export function App() {
     } finally {
       setPurgeBusy(false);
     }
-  }, [ensureAuth, httpBase, purgeBusy, realtime]);
+  }, [ensureAuth, httpBase, pipWindow, purgeBusy, realtime]);
 
   useEffect(() => {
     return () => {
@@ -598,6 +644,7 @@ export function App() {
     setTranscript([]);
     setDeliveryObservations([]);
     setOverlayState(DEFAULT_STATE);
+    setActiveGuidanceId(null);
     setSuggestionStage("idle");
     setActivePlaybookStageId("greeting");
     setSessionStart(null);
@@ -636,32 +683,71 @@ export function App() {
     setInstallPrompt(null);
   }, [installPrompt]);
 
-  const onShown = async (itemId: string) => {
-    await postUiEvent({ tenantId: PERSONAL_TENANT_ID, repId: PERSONAL_REP_ID, sessionId, eventType: "suggestion_shown", data: { itemId } }, httpBase, tokenRef.current);
+  const openFloatingGuidance = useCallback(async () => {
+    if (pipWindow && !pipWindow.closed) {
+      pipWindow.focus();
+      return;
+    }
+    try {
+      const nextWindow = await openGuidancePip();
+      nextWindow.addEventListener("pagehide", () => setPipWindow(null), {
+        once: true
+      });
+      setPipWindow(nextWindow);
+    } catch (pipError) {
+      setError(
+        pipError instanceof Error
+          ? pipError.message
+          : "Always-on-top guidance could not be opened."
+      );
+    }
+  }, [pipWindow]);
+
+  useEffect(() => {
+    return () => {
+      if (pipWindow && !pipWindow.closed) pipWindow.close();
+    };
+  }, [pipWindow]);
+
+  const onShown = async (guidanceId: string) => {
+    if (!guidanceId) return;
+    await postUiEvent({ tenantId: PERSONAL_TENANT_ID, repId: PERSONAL_REP_ID, sessionId, eventType: "suggestion_shown", data: { guidanceId } }, httpBase, tokenRef.current);
   };
-  const onApply = async (itemId: string) => {
-    await postUiEvent({ tenantId: PERSONAL_TENANT_ID, repId: PERSONAL_REP_ID, sessionId, eventType: "suggestion_applied", data: { itemId } }, httpBase, tokenRef.current);
+  const onApply = async (guidanceId: string) => {
+    if (!guidanceId) return;
+    await postUiEvent({ tenantId: PERSONAL_TENANT_ID, repId: PERSONAL_REP_ID, sessionId, eventType: "suggestion_applied", data: { guidanceId } }, httpBase, tokenRef.current);
     addToast("success", "Marked as used", 1800);
   };
-  const onDismiss = async (itemId: string) => {
+  const onDismiss = async (guidanceId: string) => {
+    if (guidanceId) {
+      await postUiEvent({ tenantId: PERSONAL_TENANT_ID, repId: PERSONAL_REP_ID, sessionId, eventType: "suggestion_dismissed", data: { guidanceId } }, httpBase, tokenRef.current);
+    }
     setOverlayState((current) => ({
       ...current,
       text: "",
-      guidance: { items: current.guidance.items.filter((item) => item.id !== itemId) }
+      guidance: { items: [] }
     } as OverlayStateV1));
+    setActiveGuidanceId(null);
     setSuggestionStage("idle");
   };
   const onMuteToggle = async () => {
+    const nextMuted = !overlayState.settings.controls.guidanceMuted;
     setOverlayState((current) => ({
       ...current,
       settings: {
         ...current.settings,
         controls: {
           ...current.settings.controls,
-          guidanceMuted: !current.settings.controls.guidanceMuted
+          guidanceMuted: nextMuted
         }
       }
     }));
+    await postUiEvent({
+      tenantId: PERSONAL_TENANT_ID,
+      repId: PERSONAL_REP_ID,
+      sessionId,
+      eventType: nextMuted ? "mute_on" : "mute_off"
+    }, httpBase, tokenRef.current);
   };
 
   if (showOnboarding) {
@@ -800,6 +886,7 @@ export function App() {
         <div className="header-actions">
           <span className={`connection connection--${wsStatus}`}><i />{wsStatus === "ready" ? "Live" : wsStatus === "connecting" ? "Connecting" : "Offline"}</span>
           <span className="elapsed" aria-label={`Session duration ${elapsed}`}>{elapsed}</span>
+          {pipSupported && <button className="quiet-button" onClick={() => void openFloatingGuidance()}>{pipWindow ? "Floating" : "Float"}</button>}
           {installPrompt && <button className="quiet-button" onClick={installApp}>Install</button>}
           <button className="quiet-button" onClick={() => setHelpOpen(true)}>Help</button>
           <button className="quiet-button" onClick={newSession}>New</button>
@@ -824,9 +911,9 @@ export function App() {
 
       {detailsOpen && <section className="automation-strip" aria-label="Automatic private runtime data">
         <div className={`automation-item ${automation?.apiKey.configured ? "automation-item--ready" : "automation-item--warning"}`}>
-          <span>API key</span>
-          <strong>{automation ? automation.apiKey.configured ? "Loaded at startup" : "Not configured" : "Checking…"}</strong>
-          <small>Server only</small>
+          <span>Coach engine</span>
+          <strong>{automation ? automation.apiKey.configured ? `${automation.apiKey.provider === "local" ? "Local" : "Cloud"} model ready` : "Deterministic fallback" : "Checking…"}</strong>
+          <small>{automation?.apiKey.liveModel ?? "Private runtime"}</small>
         </div>
         <div className="automation-item automation-item--ready">
           <span>Memory</span>
@@ -841,8 +928,9 @@ export function App() {
         </div>
         <div className="automation-item automation-item--ready">
           <span>Transcripts</span>
-          <strong>Capture + delivery learning on</strong>
-          <small>{deliveryObservations.length > 0 ? `${deliveryObservations.length} speaking comparisons this session` : "Learns memory every 6 turns"}</small>
+          <strong>{automation?.transcripts.localAvailable ? "Local GPU path ready" : "Encrypted capture on"}</strong>
+          <small>{automation?.transcripts.localAvailable ? automation.transcripts.localModel : deliveryObservations.length > 0 ? `${deliveryObservations.length} speaking comparisons this session` : "Cloud STT remains optional"}</small>
+          <button type="button" onClick={() => setArchiveSearchOpen(true)}>Search archive</button>
         </div>
         <div className={`automation-item ${automation?.google.authorized ? "automation-item--ready" : "automation-item--warning"}`}>
           <span>Gmail + Drive</span>
@@ -916,6 +1004,7 @@ export function App() {
           <OverlayPreview
             state={overlayState}
             stage={suggestionStage}
+            guidanceId={activeGuidanceId ?? undefined}
             onShown={onShown}
             onApply={onApply}
             onDismiss={onDismiss}
@@ -1088,6 +1177,33 @@ export function App() {
             onFactsChanged={refreshAutomation}
           />
         </ErrorBoundary>
+      )}
+      {archiveSearchOpen && (
+        <ErrorBoundary>
+          <ArchiveSearchPanel
+            httpBase={httpBase}
+            getAuthToken={ensureAuth}
+            onClose={() => setArchiveSearchOpen(false)}
+          />
+        </ErrorBoundary>
+      )}
+      {pipWindow && !pipWindow.closed && createPortal(
+        <main className="pip-guidance-shell" aria-label="Always-on-top response guidance">
+          <header>
+            <span>Live Rhetoric</span>
+            <strong>{SCENARIO_LABELS[profile.mode]}</strong>
+          </header>
+          <OverlayPreview
+            state={overlayState}
+            stage={suggestionStage}
+            guidanceId={activeGuidanceId ?? undefined}
+            onShown={async () => undefined}
+            onApply={onApply}
+            onDismiss={onDismiss}
+            onMuteToggle={onMuteToggle}
+          />
+        </main>,
+        pipWindow.document.body
       )}
     </div>
   );
