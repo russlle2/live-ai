@@ -4,6 +4,7 @@ import path from "node:path";
 import { z } from "zod";
 import type { ScenarioModeV1, SessionProfileV1 } from "@overlay-assistant/shared";
 import { CONFIG } from "../config.js";
+import { PrivateJsonStore } from "../integrations/google/private_store.js";
 import { EncryptedJsonlArchiveV2 } from "../storage/encrypted_jsonl_archive_v2.js";
 
 export const MemoryFactSchema = z.object({
@@ -80,6 +81,11 @@ const sessionArchives = new Map<
   string,
   { encryptionKey: string; archive: EncryptedJsonlArchiveV2<SessionTurn> }
 >();
+let personalMemoryStoreCache: {
+  filePath: string;
+  encryptionKey: string;
+  store: PrivateJsonStore<MemoryFile>;
+} | null = null;
 
 function emptyMemory(): MemoryFile {
   return {
@@ -90,34 +96,37 @@ function emptyMemory(): MemoryFile {
   };
 }
 
-async function ensureParent(): Promise<void> {
-  const directory = path.dirname(CONFIG.personalMemoryPath);
-  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-  await fs.chmod(directory, 0o700);
-}
-
 export async function readMemoryFile(): Promise<MemoryFile> {
-  try {
-    const raw = await fs.readFile(CONFIG.personalMemoryPath, "utf8");
-    return MemoryFileSchema.parse(JSON.parse(raw));
-  } catch (error: any) {
-    if (error?.code === "ENOENT") return emptyMemory();
-    throw error;
-  }
+  return personalMemoryStore().read();
 }
 
 async function writeMemoryFile(memory: MemoryFile): Promise<void> {
-  await ensureParent();
   const next = { ...memory, generatedAt: new Date().toISOString() };
-  const tempPath = `${CONFIG.personalMemoryPath}.${process.pid}.tmp`;
-  try {
-    await fs.writeFile(tempPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-    await fs.rename(tempPath, CONFIG.personalMemoryPath);
-    await fs.chmod(CONFIG.personalMemoryPath, 0o600);
-  } catch (error) {
-    await fs.unlink(tempPath).catch(() => undefined);
-    throw error;
+  await personalMemoryStore().write(next);
+}
+
+function personalMemoryStore(): PrivateJsonStore<MemoryFile> {
+  if (CONFIG.privateStorageEncryptionKey.trim().length < 32) {
+    throw new Error("Private storage encryption is not configured");
   }
+  if (
+    personalMemoryStoreCache?.filePath === CONFIG.personalMemoryPath &&
+    personalMemoryStoreCache.encryptionKey === CONFIG.privateStorageEncryptionKey
+  ) {
+    return personalMemoryStoreCache.store;
+  }
+  const store = new PrivateJsonStore(
+    CONFIG.personalMemoryPath,
+    MemoryFileSchema,
+    emptyMemory,
+    CONFIG.privateStorageEncryptionKey
+  );
+  personalMemoryStoreCache = {
+    filePath: CONFIG.personalMemoryPath,
+    encryptionKey: CONFIG.privateStorageEncryptionKey,
+    store
+  };
+  return store;
 }
 
 async function clearMemoryTempFiles(): Promise<number> {

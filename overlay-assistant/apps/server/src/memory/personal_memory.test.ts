@@ -8,9 +8,11 @@ import {
   appendSessionTurn,
   clearMemoryFile,
   rankMemoryFacts,
+  readMemoryFile,
   readSessionTurns,
   removeGoogleSourceFactsForSource,
-  searchSessionTurns
+  searchSessionTurns,
+  upsertMemoryFacts
 } from "./personal_memory.js";
 
 const originalMemoryPath = CONFIG.personalMemoryPath;
@@ -42,6 +44,29 @@ function fact(overrides: Partial<MemoryFact> & Pick<MemoryFact, "id" | "category
 }
 
 describe("personal memory retrieval", () => {
+  it("encrypts the personal evidence bank without changing retrieval semantics", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "live-rhetoric-memory-encrypted-"));
+    temporaryDirectories.push(directory);
+    CONFIG.personalMemoryPath = path.join(directory, "personal-memory.json");
+    CONFIG.privateStorageEncryptionKey = "test-personal-memory-key-at-least-32-characters";
+    await upsertMemoryFacts([{
+      id: "private-fact",
+      category: "preference",
+      fact: "Prefers concise and direct answers.",
+      keywords: ["concise"],
+      source: { type: "manual" },
+      confidence: 0.9,
+      sensitivity: "normal",
+      temporality: "durable",
+      userVerified: true
+    }]);
+
+    const raw = await fs.readFile(CONFIG.personalMemoryPath, "utf8");
+    expect(raw).toContain("private_encrypted_json_v1");
+    expect(raw).not.toContain("Prefers concise and direct answers");
+    expect((await readMemoryFile()).facts[0]?.id).toBe("private-fact");
+  });
+
   it("ranks relevant, verified evidence first", () => {
     const result = rankMemoryFacts([
       fact({ id: "generic", category: "preference", fact: "Prefers concise answers." }),
@@ -191,6 +216,7 @@ describe("personal memory retrieval", () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "live-rhetoric-memory-purge-"));
     temporaryDirectories.push(directory);
     CONFIG.personalMemoryPath = path.join(directory, "personal-memory.json");
+    CONFIG.privateStorageEncryptionKey = "test-memory-purge-key-at-least-32-characters";
     await fs.writeFile(CONFIG.personalMemoryPath, "{not valid json", { mode: 0o600 });
     const crashTemp = `${CONFIG.personalMemoryPath}.old-process.tmp`;
     await fs.writeFile(crashTemp, "private stale data", { mode: 0o600 });
@@ -200,8 +226,13 @@ describe("personal memory retrieval", () => {
       countKnown: false,
       removedTempFiles: 1
     });
-    const after = JSON.parse(await fs.readFile(CONFIG.personalMemoryPath, "utf8"));
-    expect(after).toMatchObject({ schema: "personal_memory_v1", facts: [] });
+    const after = await fs.readFile(CONFIG.personalMemoryPath, "utf8");
+    expect(after).toContain("private_encrypted_json_v1");
+    expect(after).not.toContain("not valid json");
+    expect(await readMemoryFile()).toMatchObject({
+      schema: "personal_memory_v1",
+      facts: []
+    });
     expect((await fs.stat(CONFIG.personalMemoryPath)).mode & 0o777).toBe(0o600);
     await expect(fs.stat(crashTemp)).rejects.toMatchObject({ code: "ENOENT" });
   });
