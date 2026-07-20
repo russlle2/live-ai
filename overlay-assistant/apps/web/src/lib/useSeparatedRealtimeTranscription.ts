@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  startAudioFrameCapture,
+  type AudioFrameCapture
+} from "./audioFrameCapture";
+import {
   DirectionalSpeakerFusion,
   estimateStereoDirection,
   interpretOwnerVerifierResult,
   type DirectionEstimate
 } from "./directionalSpeaker";
 import { RealtimeCommitBinder } from "./realtimeCommitBinder";
+import { StreamingVadV2 } from "./streamingVadV2";
 import { SynchronizedTurnAudioRecorder, type RecordedTurnAudio } from "./turnAudioRecorder";
 import {
   encodePcm16Wav,
@@ -127,9 +132,6 @@ type MixedSpeakerDecision = {
 };
 
 const OPENAI_REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls";
-const SILENCE_TO_COMMIT_MS = 460;
-const MIN_VOICED_MS = 120;
-const ENERGY_THRESHOLD = 0.018;
 const MIXED_VOICE_DECISION_WAIT_MS = 900;
 const COMMIT_EVIDENCE_TTL_MS = 30_000;
 
@@ -439,11 +441,8 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
       const captureGeneration = enrollmentGenerationRef.current;
       const commitBinder = new RealtimeCommitBinder<MixedSpeakerDecision>();
       let partial = "";
-      let lastDeltaAt = 0;
       let recorder: SynchronizedTurnAudioRecorder | null = null;
-      let frame = 0;
-      let speechStartedAt = 0;
-      let lastVoiceAt = 0;
+      let frameCapture: AudioFrameCapture | null = null;
       let committedForTurn = false;
       let localTurnSequence = 0;
 
@@ -457,18 +456,11 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
           if (type === "conversation.item.input_audio_transcription.delta") {
             const delta = typeof data.delta === "string" ? data.delta : "";
             partial += delta;
-            lastDeltaAt = performance.now();
-            if (!speechStartedAt && !committedForTurn) {
-              speechStartedAt = lastDeltaAt;
-              lastVoiceAt = lastDeltaAt;
-              recorder?.begin();
-            }
             callbackRef.current.onInterim?.({ source: outputSource, text: partial.trimStart() });
           }
           if (type === "conversation.item.input_audio_transcription.completed") {
             const completed = typeof data.transcript === "string" ? data.transcript.trim() : partial.trim();
             partial = "";
-            lastDeltaAt = 0;
             callbackRef.current.onInterim?.({ source: outputSource, text: "" });
             if (completed) {
               const itemId = typeof data.item_id === "string" ? data.item_id : null;
@@ -524,43 +516,100 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
       }
       await peer.setRemoteDescription({ type: "answer", sdp: await answerResponse.text() });
 
-      // The transcription session uses manual commits. Energy detection remains
-      // local and sends a commit shortly after the speaker stops.
+      // Manual commits are driven by audio-time VAD frames from AudioWorklet,
+      // not requestAnimationFrame, so background-tab throttling cannot stall turns.
       const AudioContextCtor = window.AudioContext || (window as typeof window & {
         webkitAudioContext?: typeof AudioContext;
       }).webkitAudioContext;
-      const audioContext = AudioContextCtor ? new AudioContextCtor() : null;
-      if (audioContext?.state === "suspended") void audioContext.resume().catch(() => undefined);
-      const analyser = audioContext?.createAnalyser() ?? null;
-      const sourceNode = audioContext?.createMediaStreamSource(stream) ?? null;
-      if (analyser && sourceNode) {
-        analyser.fftSize = 1024;
-        sourceNode.connect(analyser);
+      if (!AudioContextCtor) {
+        events.close();
+        peer.close();
+        throw new Error("Web Audio is required for reliable turn detection.");
       }
-      const sample = analyser ? new Float32Array(analyser.fftSize) : null;
-
+      const audioContext = new AudioContextCtor();
+      if (audioContext.state === "suspended") void audioContext.resume().catch(() => undefined);
+      const sourceNode = audioContext.createMediaStreamSource(stream);
       const reportedChannels = audioTrack.getSettings().channelCount;
       const recorderChannelCount: 1 | 2 = mixedMode && typeof reportedChannels === "number" && reportedChannels >= 2 ? 2 : 1;
-      const recorderProcessor = mixedMode && audioContext && sourceNode
-        ? audioContext.createScriptProcessor(2_048, recorderChannelCount, 1)
-        : null;
-      const recorderSilentOutput = recorderProcessor && audioContext ? audioContext.createGain() : null;
-      if (recorderProcessor && recorderSilentOutput && sourceNode && audioContext) {
+      if (mixedMode) {
         recorder = new SynchronizedTurnAudioRecorder({
           sampleRate: audioContext.sampleRate,
           channelCount: recorderChannelCount
         });
-        recorderSilentOutput.gain.value = 0;
-        recorderProcessor.onaudioprocess = (audioEvent) => {
-          const left = audioEvent.inputBuffer.getChannelData(0);
-          const right = recorderChannelCount === 2 && audioEvent.inputBuffer.numberOfChannels >= 2
-            ? audioEvent.inputBuffer.getChannelData(1)
-            : null;
-          recorder?.push(left, right);
-        };
-        sourceNode.connect(recorderProcessor);
-        recorderProcessor.connect(recorderSilentOutput);
-        recorderSilentOutput.connect(audioContext.destination);
+      }
+
+      let pendingCommit = false;
+      let pendingRecorded: RecordedTurnAudio | null = null;
+      const sendCommit = (recorded: RecordedTurnAudio | null) => {
+        if (events.readyState !== "open") return;
+        if (mixedMode) {
+          localTurnSequence += 1;
+          const localTurnId = `${captureGeneration}-${localTurnSequence}`;
+          commitBinder.enqueue({
+            localTurnId,
+            committedAt: Date.now(),
+            decision: recorded
+              ? classifyMixedTurn(recorded, captureGeneration, localTurnId)
+              : Promise.resolve(unknownDecision("no_synchronized_pcm", localTurnId))
+          });
+        }
+        events.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+        committedForTurn = true;
+        pendingCommit = false;
+        pendingRecorded = null;
+      };
+      const commit = () => {
+        const recorded = mixedMode ? recorder?.finish() ?? null : null;
+        if (events.readyState !== "open") {
+          pendingCommit = true;
+          pendingRecorded = recorded;
+          committedForTurn = true;
+          return;
+        }
+        sendCommit(recorded);
+      };
+      events.addEventListener("open", () => {
+        if (pendingCommit) sendCommit(pendingRecorded);
+      });
+
+      const vad = new StreamingVadV2({
+        sampleRate: audioContext.sampleRate,
+        minimumSpeechMs: 120,
+        silenceToEndMs: 460,
+        maximumSpeechMs: 15_000
+      });
+      try {
+        frameCapture = await startAudioFrameCapture({
+          audioContext,
+          source: sourceNode,
+          channelCount: recorderChannelCount,
+          onFrame: ({ left, right }) => {
+            recorder?.push(left, right);
+            for (const vadEvent of vad.push(left)) {
+              if (vadEvent === "speech_started") {
+                recorder?.begin();
+                committedForTurn = false;
+              } else if (vadEvent === "speech_ended" && !committedForTurn) {
+                commit();
+              } else if (vadEvent === "speech_cancelled") {
+                recorder?.cancel();
+                committedForTurn = true;
+                if (events.readyState === "open") {
+                  events.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+                }
+              }
+            }
+          },
+          onError: () => {
+            setMessage("Low-level audio analysis stopped; automatic turn commits are unavailable.");
+          }
+        });
+      } catch (error) {
+        sourceNode.disconnect();
+        void audioContext.close();
+        events.close();
+        peer.close();
+        throw error;
       }
       if (mixedMode) {
         const requested = callbackRef.current.twoPartyDirectionalMode === true;
@@ -578,76 +627,23 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
         });
       }
 
-      const commit = () => {
-        if (events.readyState !== "open") return;
-        if (mixedMode) {
-          localTurnSequence += 1;
-          const localTurnId = `${captureGeneration}-${localTurnSequence}`;
-          const recorded = recorder?.finish() ?? null;
-          commitBinder.enqueue({
-            localTurnId,
-            committedAt: Date.now(),
-            decision: recorded
-              ? classifyMixedTurn(recorded, captureGeneration, localTurnId)
-              : Promise.resolve(unknownDecision("no_synchronized_pcm", localTurnId))
-          });
-        }
-        events.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-        committedForTurn = true;
-        speechStartedAt = 0;
-        lastVoiceAt = 0;
-      };
-      const watchEnergy = () => {
-        if (!analyser || !sample || peer.connectionState === "closed") return;
-        analyser.getFloatTimeDomainData(sample);
-        let sum = 0;
-        for (let i = 0; i < sample.length; i += 1) sum += sample[i] * sample[i];
-        const rms = Math.sqrt(sum / sample.length);
-        const now = performance.now();
-        if (rms >= ENERGY_THRESHOLD) {
-          if (!speechStartedAt) {
-            speechStartedAt = now;
-            recorder?.begin();
-          }
-          lastVoiceAt = now;
-          committedForTurn = false;
-        } else if (
-          speechStartedAt &&
-          !committedForTurn &&
-          now - speechStartedAt >= MIN_VOICED_MS &&
-          now - lastVoiceAt >= SILENCE_TO_COMMIT_MS &&
-          events.readyState === "open"
-        ) {
-          commit();
-        }
-        frame = requestAnimationFrame(watchEnergy);
-      };
-      if (analyser) frame = requestAnimationFrame(watchEnergy);
-
-      // Some browsers suspend Web Audio after an asynchronous permission flow.
-      // Realtime deltas provide a second silence signal so manual turn commits
-      // still complete even when the energy analyser cannot run.
-      const deltaCommitTimer = window.setInterval(() => {
-        if (partial && lastDeltaAt && performance.now() - lastDeltaAt >= SILENCE_TO_COMMIT_MS && !committedForTurn) {
-          commit();
-        }
-      }, 120);
+      if (events.readyState === "open" && pendingCommit) {
+        sendCommit(pendingRecorded);
+      }
       const evidenceExpiryTimer = window.setInterval(() => {
         commitBinder.expireBefore(Date.now() - COMMIT_EVIDENCE_TTL_MS);
       }, 5_000);
 
       const close = () => {
-        if (frame) cancelAnimationFrame(frame);
-        window.clearInterval(deltaCommitTimer);
         window.clearInterval(evidenceExpiryTimer);
         commitBinder.clear();
+        vad.reset();
+        pendingCommit = false;
+        pendingRecorded = null;
         recorder?.cancel();
-        if (recorderProcessor) recorderProcessor.onaudioprocess = null;
-        recorderProcessor?.disconnect();
-        recorderSilentOutput?.disconnect();
-        sourceNode?.disconnect();
-        analyser?.disconnect();
-        void audioContext?.close();
+        frameCapture?.stop();
+        sourceNode.disconnect();
+        void audioContext.close();
         if (events.readyState === "open") {
           events.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
         }
@@ -779,7 +775,7 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
     };
 
     try {
-      enrollmentCaptureRef.current = startOwnerVoiceSegmentCapture({
+      enrollmentCaptureRef.current = await startOwnerVoiceSegmentCapture({
         stream: micStream,
         maxSegments: normalizeOwnerEnrollmentProgress({
           sampleCount: uploadedSegments,
