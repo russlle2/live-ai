@@ -94,6 +94,13 @@ export type WsServerMessageV1 =
   | TranscriptFinalV1
   | DeliveryObservationMessageV1
   | {
+      type: "interruption_detected";
+      session_id: string;
+      at: string;
+      interruptedTurnId: string;
+      interruptingTurnId: string;
+    }
+  | {
       type: "overlay_message";
       session_id: string;
       at: string;

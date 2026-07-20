@@ -1,4 +1,5 @@
 import type { MemoryFactWriteInput } from "./memoryReview";
+import type { RuntimeEventV2 } from "@overlay-assistant/runtime";
 
 type RequestOptions = {
   method?: "GET" | "POST" | "DELETE";
@@ -42,6 +43,18 @@ export async function postUiEvent(
     // Silently fail — telemetry should never break the UX
     console.warn("[api] Failed to send UI event:", e.eventType);
   }
+}
+
+export async function postRuntimeEvent(
+  event: RuntimeEventV2,
+  httpBase?: string,
+  token?: string | null
+): Promise<void> {
+  await requestJson("/api/runtime/events", httpBase, {
+    method: "POST",
+    body: event as unknown as Record<string, unknown>,
+    token
+  });
 }
 
 export async function login(

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { RuntimeEventV2 } from "@overlay-assistant/runtime";
 import {
   startAudioFrameCapture,
   type AudioFrameCapture
@@ -10,6 +11,7 @@ import {
   type DirectionEstimate
 } from "./directionalSpeaker";
 import { RealtimeCommitBinder } from "./realtimeCommitBinder";
+import { SpeechRuntimeEventFactoryV2 } from "./speechRuntimeEvents";
 import { StreamingVadV2 } from "./streamingVadV2";
 import { SynchronizedTurnAudioRecorder, type RecordedTurnAudio } from "./turnAudioRecorder";
 import {
@@ -46,6 +48,7 @@ type UseSeparatedRealtimeOptions = {
   twoPartyDirectionalMode?: boolean;
   onFinal: (text: string, source: AudioSource, attribution: RealtimeSpeakerAttribution) => void;
   onInterim?: (event: RealtimeInterim) => void;
+  onRuntimeEvent?: (event: RuntimeEventV2) => void;
   onVoiceEnrollmentStatus?: (status: VoiceEnrollmentStatus) => void;
   onDirectionalStatus?: (status: DirectionalAudioStatus) => void;
 };
@@ -439,6 +442,17 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
 
       const mixedMode = outputSource === "unknown";
       const captureGeneration = enrollmentGenerationRef.current;
+      const runtimeEvents = new SpeechRuntimeEventFactoryV2({
+        sessionId: callbackRef.current.sessionId,
+        sourceId: `realtime-${tokenSource}-${outputSource}`,
+        speaker: outputSource === "rep"
+          ? "owner"
+          : outputSource === "lead"
+            ? "remote"
+            : "unknown",
+        provenance: mixedMode ? "unverified" : "separated_channel",
+        confidence: mixedMode ? 0 : 1
+      });
       const commitBinder = new RealtimeCommitBinder<MixedSpeakerDecision>();
       let partial = "";
       let recorder: SynchronizedTurnAudioRecorder | null = null;
@@ -587,11 +601,16 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
             recorder?.push(left, right);
             for (const vadEvent of vad.push(left)) {
               if (vadEvent === "speech_started") {
+                callbackRef.current.onRuntimeEvent?.(runtimeEvents.start());
                 recorder?.begin();
                 committedForTurn = false;
               } else if (vadEvent === "speech_ended" && !committedForTurn) {
+                const ended = runtimeEvents.end("silence");
+                if (ended) callbackRef.current.onRuntimeEvent?.(ended);
                 commit();
               } else if (vadEvent === "speech_cancelled") {
+                const cancelled = runtimeEvents.end("cancelled");
+                if (cancelled) callbackRef.current.onRuntimeEvent?.(cancelled);
                 recorder?.cancel();
                 committedForTurn = true;
                 if (events.readyState === "open") {
@@ -637,6 +656,8 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
       const close = () => {
         window.clearInterval(evidenceExpiryTimer);
         commitBinder.clear();
+        const ended = runtimeEvents.end("source_end");
+        if (ended) callbackRef.current.onRuntimeEvent?.(ended);
         vad.reset();
         pendingCommit = false;
         pendingRecorded = null;

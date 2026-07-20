@@ -140,6 +140,54 @@ async function checkWebSocket(token) {
     signal: AbortSignal.timeout(2_000)
   });
   assert.equal(feedback.ok, true, `guidance feedback returned ${feedback.status}`);
+
+  const interruptionMessage = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("interruption event timed out")), 2_000);
+    const onMessage = (data) => {
+      const message = JSON.parse(String(data));
+      if (message.type !== "interruption_detected") return;
+      clearTimeout(timeout);
+      ws.off("message", onMessage);
+      resolve(message);
+    };
+    ws.on("message", onMessage);
+  });
+  const runtimeEvent = (eventId, sourceId, speaker, turnId) => ({
+    protocolVersion: 2,
+    eventId,
+    sessionId: "runtime-smoke-session",
+    sourceId,
+    sequence: 1,
+    capturedAtMonotonicMs: 100,
+    capturedAt: "2026-07-20T18:00:00.000Z",
+    receivedAt: "2026-07-20T18:00:00.000Z",
+    privacyClass: "private",
+    provenance: "separated_channel",
+    confidence: 1,
+    payload: { type: "speech.started", turnId, speaker }
+  });
+  for (const event of [
+    runtimeEvent("event-owner", "owner-mic", "owner", "turn-owner"),
+    runtimeEvent("event-remote", "remote-tab", "remote", "turn-remote")
+  ]) {
+    const response = await fetch(`${baseUrl}/api/runtime/events`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(event),
+      signal: AbortSignal.timeout(2_000)
+    });
+    assert.equal(response.ok, true, `runtime event returned ${response.status}`);
+  }
+  assert.deepEqual(await interruptionMessage, {
+    type: "interruption_detected",
+    session_id: "runtime-smoke-session",
+    at: "2026-07-20T18:00:00.000Z",
+    interruptedTurnId: "turn-owner",
+    interruptingTurnId: "turn-remote"
+  });
   ws.send(JSON.stringify({ type: "stop", session_id: "runtime-smoke-session" }));
   ws.close();
 }

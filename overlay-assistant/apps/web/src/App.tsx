@@ -1,4 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { RuntimeEventV2 } from "@overlay-assistant/runtime";
 import type {
   CoachingDeliveryV1,
   ConversationPlaybookStageIdV1,
@@ -21,6 +22,7 @@ import {
   eraseAllPrivateData,
   getRuntimeAutomationStatus,
   login,
+  postRuntimeEvent,
   postUiEvent,
   runGoogleMemorySync,
   type RuntimeAutomationStatus
@@ -186,6 +188,7 @@ export function App() {
   const tokenRef = useRef<string | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shouldReconnectRef = useRef(false);
+  const runtimeEventQueueRef = useRef<Promise<void>>(Promise.resolve());
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -439,6 +442,12 @@ export function App() {
             setDeliveryObservations((current) => [...current, message].slice(-24));
             return;
           }
+          if (message.type === "interruption_detected") {
+            setOverlayState((current) => ({ ...current, text: "" } as OverlayStateV1));
+            setActiveGuidanceId(null);
+            setSuggestionStage("idle");
+            return;
+          }
           if (message.type === "overlay_message") {
             applyOverlayMessage(message.message, message.coaching);
             return;
@@ -525,6 +534,26 @@ export function App() {
     setInterims((current) => ({ ...current, [event.source]: event.text }));
   }, []);
 
+  const handleRuntimeEvent = useCallback((event: RuntimeEventV2) => {
+    if (
+      event.payload.type === "speech.started" &&
+      event.payload.speaker === "remote"
+    ) {
+      setOverlayState((current) => ({ ...current, text: "" } as OverlayStateV1));
+      setActiveGuidanceId(null);
+      setSuggestionStage("idle");
+    }
+    runtimeEventQueueRef.current = runtimeEventQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        const token = await ensureAuth();
+        await postRuntimeEvent(event, httpBase, token);
+      })
+      .catch(() => {
+        setError("Live speech-state synchronization was interrupted.");
+      });
+  }, [ensureAuth, httpBase]);
+
   const realtime = useSeparatedRealtimeTranscription({
     enabled: deviceRole === "audio_host" && wsStatus === "ready",
     httpBase,
@@ -532,7 +561,8 @@ export function App() {
     getAuthToken: ensureAuth,
     twoPartyDirectionalMode,
     onFinal: handleRealtimeFinal,
-    onInterim: handleRealtimeInterim
+    onInterim: handleRealtimeInterim,
+    onRuntimeEvent: handleRuntimeEvent
   });
 
   const purgePrivateData = useCallback(async () => {

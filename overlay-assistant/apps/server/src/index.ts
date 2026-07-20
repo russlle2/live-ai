@@ -9,7 +9,11 @@ import compression from "compression";
 import { WebSocketServer } from "ws";
 import { z } from "zod";
 import {
+  initialConversationStateV2,
   MIN_STYLE_OBSERVATIONS_V2,
+  parseRuntimeEventV2,
+  reduceConversationStateV2,
+  type ConversationStateV2,
   type StyleObservationSourceV2
 } from "@overlay-assistant/runtime";
 
@@ -228,6 +232,7 @@ type SessionCtx = {
   lastActivity: number;
   productContext?: ProductContext;
   conversationHistory: ConversationTurn[];
+  runtimeState: ConversationStateV2;
   latestLeadSeq: number;
   mockStarted: boolean;
   learningInFlight: boolean;
@@ -629,6 +634,48 @@ app.post("/api/auth/login", authRateLimit, (req, res) => {
   const token = signToken(admission.identity);
   return sendOk(res, { token, mode: "jwt", expiresIn: CONFIG.authTokenTtl });
 });
+
+const runtimeEventRateLimit = createRouteRateLimit({
+  key: "runtime_event",
+  max: 600,
+  windowMs: 60_000,
+  keySelector: (req) => req.auth?.repId ?? req.ip ?? "unknown_user"
+});
+
+app.post("/api/runtime/events", requireAuth, runtimeEventRateLimit, asyncRoute(async (req, res) => {
+  let event: ReturnType<typeof parseRuntimeEventV2>;
+  try {
+    event = parseRuntimeEventV2(req.body);
+  } catch {
+    return sendErr(res, 400, "invalid_runtime_event");
+  }
+  const ctx = sessions.get(event.sessionId);
+  if (!ctx) return sendErr(res, 404, "unknown_session");
+  if (!assertTenantAccess(req, ctx.tenantId)) {
+    return sendErr(res, 403, "forbidden", "Tenant mismatch");
+  }
+
+  const previousInterruptionId = ctx.runtimeState.lastInterruption?.eventId;
+  ctx.runtimeState = reduceConversationStateV2(ctx.runtimeState, event);
+  ctx.lastActivity = Date.now();
+  if (event.payload.type === "speech.started") {
+    ctx.guidance.cancel(`${event.payload.speaker}_speech_started`);
+  }
+  const interruption = ctx.runtimeState.lastInterruption;
+  if (interruption && interruption.eventId !== previousInterruptionId) {
+    broadcast(ctx.sessionId, {
+      type: "interruption_detected",
+      session_id: ctx.sessionId,
+      at: interruption.detectedAt,
+      interruptedTurnId: interruption.interruptedTurnId,
+      interruptingTurnId: interruption.interruptingTurnId
+    });
+  }
+  return sendOk(res, {
+    accepted: true,
+    overlapActive: ctx.runtimeState.overlapActive
+  });
+}));
 
 app.post("/api/demo/transcript_final", requireAuth, rateLimitCoaching, asyncRoute(async (req, res) => {
   const parsed = TranscriptFinalInput.safeParse(req.body);
@@ -1761,6 +1808,7 @@ wss.on("connection", (ws, request) => {
         profile: { ...DEFAULT_SESSION_PROFILE_V1 },
         lastActivity: Date.now(),
         conversationHistory: [],
+        runtimeState: initialConversationStateV2(sessionId),
         latestLeadSeq: 0,
         mockStarted: false,
         learningInFlight: false,
