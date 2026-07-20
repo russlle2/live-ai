@@ -55,6 +55,51 @@ function output(overrides: Partial<CoachOutput> = {}): CoachOutput {
 }
 
 describe("AI coach prompt", () => {
+  it("uses OpenAI-compatible chat structured output for a local provider", async () => {
+    let chatRequest: Record<string, unknown> | undefined;
+    const client = {
+      responses: {
+        parse: async () => {
+          throw new Error("cloud Responses API must not be used");
+        }
+      },
+      chat: {
+        completions: {
+          parse: async (input: Record<string, unknown>) => {
+            chatRequest = input;
+            return {
+              choices: [{ message: { parsed: output() } }],
+              usage: {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                prompt_tokens_details: { cached_tokens: 0 }
+              }
+            };
+          }
+        }
+      }
+    } as unknown as OpenAI;
+
+    const result = await getAiCoaching(
+      request(),
+      client,
+      {
+        kind: "local",
+        baseUrl: "http://127.0.0.1:11434/v1",
+        apiKey: "local-only",
+        model: "local-model"
+      }
+    );
+
+    expect(chatRequest?.model).toBe("local-model");
+    expect(chatRequest?.messages).toBeInstanceOf(Array);
+    expect(result).toMatchObject({
+      aiGenerated: true,
+      coaching: expect.stringMatching(/^Say:/)
+    });
+  });
+
   it("propagates cancellation to the OpenAI request without treating it as a model failure", async () => {
     const controller = new AbortController();
     let requestSignal: AbortSignal | undefined;

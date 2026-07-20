@@ -1,4 +1,4 @@
-import { zodTextFormat } from "openai/helpers/zod";
+import { zodResponseFormat, zodTextFormat } from "openai/helpers/zod";
 import type OpenAI from "openai";
 import type { ReasoningEffort } from "openai/resources/shared";
 import { z } from "zod";
@@ -17,7 +17,8 @@ import {
   getCoachingOpenAIClient,
   getCoachingProviderConfig,
   isCoachingConfigured,
-  openAISafetyIdentifier
+  openAISafetyIdentifier,
+  type CoachingProviderConfig
 } from "../openai/client.js";
 
 export type ConversationTurn = {
@@ -427,11 +428,13 @@ export function isAiCoachEnabled(): boolean {
 
 export async function getAiCoaching(
   req: CoachRequest,
-  clientOverride?: OpenAI | null
+  clientOverride?: OpenAI | null,
+  providerOverride?: CoachingProviderConfig
 ): Promise<CoachResponse | null> {
-  const provider = clientOverride === undefined
-    ? getCoachingProviderConfig()
-    : { kind: "cloud" as const, apiKey: "test", model: CONFIG.openaiModel };
+  const provider = providerOverride ??
+    (clientOverride === undefined
+      ? getCoachingProviderConfig()
+      : { kind: "cloud" as const, apiKey: "test", model: CONFIG.openaiModel });
   const client = clientOverride === undefined
     ? getCoachingOpenAIClient()
     : clientOverride;
@@ -441,27 +444,77 @@ export async function getAiCoaching(
   const startMs = Date.now();
 
   try {
-    const response = await client.responses.parse({
-      model,
-      instructions: buildCoachInstructions(req.profile, req.memoryFacts, req.productContext, req.coachingContext),
-      input: buildCoachInput(req),
-      text: { format: zodTextFormat(CoachOutputSchema, "live_rhetoric_coaching") },
-      reasoning: { effort: normalizedReasoningEffort(CONFIG.openaiReasoningEffort) },
-      max_output_tokens: 500,
-      store: false,
-      safety_identifier: openAISafetyIdentifier(req.tenantId, req.repId),
-      prompt_cache_key: `live-rhetoric:${req.profile.mode}`
-    }, {
+    let parsed: CoachOutput | null = null;
+    let usage: {
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+      cachedTokens: number;
+    } | null = null;
+    const requestOptions = {
       timeout: CONFIG.openaiRequestTimeoutMs,
       ...(req.signal ? { signal: req.signal } : {})
-    });
+    };
+    if (provider.kind === "local") {
+      const response = await client.chat.completions.parse({
+        model,
+        messages: [
+          {
+            role: "system",
+            content: buildCoachInstructions(
+              req.profile,
+              req.memoryFacts,
+              req.productContext,
+              req.coachingContext
+            )
+          },
+          { role: "user", content: buildCoachInput(req) }
+        ],
+        response_format: zodResponseFormat(
+          CoachOutputSchema,
+          "live_rhetoric_coaching"
+        ),
+        temperature: 0,
+        max_completion_tokens: 500
+      }, requestOptions);
+      parsed = response.choices[0]?.message.parsed ?? null;
+      if (response.usage) {
+        usage = {
+          promptTokens: response.usage.prompt_tokens,
+          completionTokens: response.usage.completion_tokens,
+          totalTokens: response.usage.total_tokens,
+          cachedTokens:
+            response.usage.prompt_tokens_details?.cached_tokens ?? 0
+        };
+      }
+    } else {
+      const response = await client.responses.parse({
+        model,
+        instructions: buildCoachInstructions(req.profile, req.memoryFacts, req.productContext, req.coachingContext),
+        input: buildCoachInput(req),
+        text: { format: zodTextFormat(CoachOutputSchema, "live_rhetoric_coaching") },
+        reasoning: { effort: normalizedReasoningEffort(CONFIG.openaiReasoningEffort) },
+        max_output_tokens: 500,
+        store: false,
+        safety_identifier: openAISafetyIdentifier(req.tenantId, req.repId),
+        prompt_cache_key: `live-rhetoric:${req.profile.mode}`
+      }, requestOptions);
+      parsed = response.output_parsed;
+      if (response.usage) {
+        usage = {
+          promptTokens: response.usage.input_tokens,
+          completionTokens: response.usage.output_tokens,
+          totalTokens: response.usage.total_tokens,
+          cachedTokens:
+            response.usage.input_tokens_details?.cached_tokens ?? 0
+        };
+      }
+    }
 
     const latencyMs = Date.now() - startMs;
-    const parsed = response.output_parsed;
     if (!parsed) throw new Error("structured_output_missing");
 
     const validation = validateCoachOutput(req, parsed);
-    const usage = response.usage;
 
     if (usage) {
       await logTokenUsage({
@@ -469,11 +522,11 @@ export async function getAiCoaching(
         repId: req.repId,
         sessionId: req.sessionId,
         model,
-        promptTokens: usage.input_tokens,
-        completionTokens: usage.output_tokens,
-        totalTokens: usage.total_tokens,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        totalTokens: usage.totalTokens,
         latencyMs,
-        cached: usage.input_tokens_details.cached_tokens > 0
+        cached: usage.cachedTokens > 0
       }).catch(() => {});
     }
 
@@ -505,7 +558,7 @@ export async function getAiCoaching(
         memoryFactsUsed: usedMemoryIds.length,
         coachingExamplesRetrieved: req.coachingContext?.examples.length ?? 0,
         coachingExampleIds: req.coachingContext?.examples.map(({ example }) => example.id) ?? [],
-        tokensUsed: usage?.total_tokens
+        tokensUsed: usage?.totalTokens
       }
     });
 

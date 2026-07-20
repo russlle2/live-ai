@@ -21,4 +21,20 @@ describe("observability privacy", () => {
     expect(first).not.toContain("personal-session-name");
     expect(first).not.toBe(opaqueLogIdentifier("session", "another-session"));
   });
+
+  it("keeps numeric token metrics while redacting credential-bearing token fields", () => {
+    expect(sanitizeLogData({
+      promptTokens: 10,
+      completionTokens: 5,
+      totalTokens: 15,
+      tokensUsed: 15,
+      accessToken: "private-access-token"
+    })).toEqual({
+      promptTokens: 10,
+      completionTokens: 5,
+      totalTokens: 15,
+      tokensUsed: 15,
+      accessToken: "[redacted]"
+    });
+  });
 });

@@ -94,6 +94,13 @@ async function insertObsEventBatch(events: PendingEvent[]): Promise<void> {
 }
 
 const SENSITIVE_KEY_PATTERN = /(token|secret|password|authorization|cookie|api[_-]?key|auth[_-]?tag|iv|encrypted)/i;
+const SAFE_NUMERIC_METRIC_KEYS = new Set([
+  "promptTokens",
+  "completionTokens",
+  "totalTokens",
+  "cachedTokens",
+  "tokensUsed"
+]);
 const SECRET_VALUE_PATTERN = /\b(?:sk|sk-proj)-[a-z0-9_-]{12,}\b|\b(?:bearer|basic)\s+[a-z0-9._~+\/-]+=*|\b(?:password|passcode|api[ _-]?key|access[ _-]?token|refresh[ _-]?token|client[ _-]?secret|private[ _-]?key|one[ -]?time code|otp)\b\s*(?:is|was|:|=)?\s*[^\s,;]{3,}/gi;
 const EMAIL_VALUE_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const PHONE_VALUE_PATTERN = /\b(?:\+?1[ .-]?)?\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}\b/g;
@@ -127,7 +134,14 @@ function clampJson(x: any, depth = 0): any {
     const out: any = {};
     for (const k of Object.keys(x).slice(0, 50)) {
       const safeKey = clampString(k, 80);
-      out[safeKey] = SENSITIVE_KEY_PATTERN.test(safeKey) ? "[redacted]" : clampJson((x as any)[k], depth + 1);
+      const rawValue = (x as any)[k];
+      const safeNumericMetric =
+        SAFE_NUMERIC_METRIC_KEYS.has(safeKey) &&
+        typeof rawValue === "number" &&
+        Number.isFinite(rawValue);
+      out[safeKey] = SENSITIVE_KEY_PATTERN.test(safeKey) && !safeNumericMetric
+        ? "[redacted]"
+        : clampJson(rawValue, depth + 1);
     }
     return out;
   }
