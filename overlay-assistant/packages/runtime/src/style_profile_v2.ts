@@ -99,14 +99,14 @@ const INITIAL_MOVEMENT_CAPS: StyleFeaturesV2 = {
   warmth: 0.03
 };
 const EMPTY_FEATURES: StyleFeaturesV2 = {
-  wordsPerResponse: 0,
-  wordsPerSentence: 0,
-  questionRatio: 0,
-  contractionRatio: 0,
-  acknowledgmentRatio: 0,
-  hedgeRatio: 0,
-  directness: 0,
-  warmth: 0
+  wordsPerResponse: 24,
+  wordsPerSentence: 12,
+  questionRatio: 0.2,
+  contractionRatio: 0.15,
+  acknowledgmentRatio: 0.15,
+  hedgeRatio: 0.12,
+  directness: 0.5,
+  warmth: 0.5
 };
 const SECRET_PATTERN =
   /\b(?:password|passcode|one[- ]time code|otp|api[ _-]?key|access[ _-]?token|refresh[ _-]?token|private[ _-]?key|social security|ssn|card number)\b/i;

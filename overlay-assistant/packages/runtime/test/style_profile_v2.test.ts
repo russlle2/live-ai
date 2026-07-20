@@ -52,8 +52,8 @@ describe("style profile v2", () => {
     expect(result.profile.version).toBe(1);
     expect(result.profile.observationCount).toBe(12);
     expect(result.profile.sessionCount).toBe(3);
-    expect(result.profile.features.directness).toBeCloseTo(0.03);
-    expect(result.profile.features.wordsPerResponse).toBeCloseTo(2);
+    expect(result.profile.features.directness).toBeCloseTo(0.53);
+    expect(result.profile.features.wordsPerResponse).toBeCloseTo(22);
     expect(JSON.stringify(result.profile)).not.toMatch(/phrase|text/i);
   });
 

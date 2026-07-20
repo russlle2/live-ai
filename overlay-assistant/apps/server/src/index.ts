@@ -8,6 +8,10 @@ import cors from "cors";
 import compression from "compression";
 import { WebSocketServer } from "ws";
 import { z } from "zod";
+import {
+  MIN_STYLE_OBSERVATIONS_V2,
+  type StyleObservationSourceV2
+} from "@overlay-assistant/runtime";
 
 import {
   sanitizePatch_v1,
@@ -85,11 +89,9 @@ import { learnFromConversation } from "./memory/conversation_learning.js";
 import {
   appendDeliveryStyleObservation,
   createDeliveryStyleObservation,
-  MIN_DELIVERY_STYLE_OBSERVATIONS,
-  readRecentDeliveryStyleObservations,
-  scheduleDeliveryStyleLearning,
   type DeliveryStyleObservation
 } from "./memory/delivery_style_learning.js";
+import { SlowStyleLearnerV2 } from "./memory/slow_style_profile_v2.js";
 import { GuidanceFeedbackStoreV2 } from "./session/guidance_feedback_v2.js";
 import { SessionGuidanceV2 } from "./session/session_guidance_v2.js";
 import { createRealtimeTranscriptionClientSecret } from "./openai/realtime_token.js";
@@ -238,14 +240,9 @@ type SessionCtx = {
   guidance: SessionGuidanceV2;
   pendingFinalSuggestion?: PendingDeliverySuggestion;
   deliveryStyleObservations: DeliveryStyleObservation[];
-  deliveryLearningInFlight: boolean;
-  deliveryLearningPending: boolean;
-  deliveryLearningPendingForce: boolean;
-  lastDeliveryLearnedCount: number;
 };
 
 const CONVERSATION_LEARNING_TURN_INTERVAL = 6;
-const DELIVERY_STYLE_LEARNING_INTERVAL = 3;
 
 const DEFAULT_CONTROLS: GuidanceControls = {
   guidanceMode: "assist",
@@ -350,107 +347,27 @@ function scheduleConversationLearning(
   });
 }
 
-/**
- * Learn cadence and phrasing outside the live-response path. Stable memory IDs
- * make repeated passes idempotent, while this session gate avoids unnecessary
- * model calls for every individual sentence.
- */
-function scheduleSessionDeliveryStyleLearning(
-  ctx: SessionCtx,
-  options: { force?: boolean } = {}
-): void {
-  if (ctx.dataEpoch !== privateDataEpoch) return;
-  const force = options.force === true;
-  const observationCount = ctx.deliveryStyleObservations.length;
-  const unlearned = observationCount - ctx.lastDeliveryLearnedCount;
-  if (observationCount < MIN_DELIVERY_STYLE_OBSERVATIONS) return;
-  if (!force && unlearned < DELIVERY_STYLE_LEARNING_INTERVAL) return;
-
-  if (ctx.deliveryLearningInFlight) {
-    ctx.deliveryLearningPending = true;
-    ctx.deliveryLearningPendingForce ||= force;
-    return;
-  }
-
-  ctx.deliveryLearningInFlight = true;
-  ctx.lastDeliveryLearnedCount = observationCount;
-  const observations = ctx.deliveryStyleObservations.slice(-8);
-  const learningEpoch = ctx.dataEpoch;
-
-  const finish = () => {
-    ctx.deliveryLearningInFlight = false;
-    const pending = ctx.deliveryLearningPending;
-    const pendingForce = ctx.deliveryLearningPendingForce;
-    ctx.deliveryLearningPending = false;
-    ctx.deliveryLearningPendingForce = false;
-    if (
-      pendingForce ||
-      (pending && ctx.deliveryStyleObservations.length - ctx.lastDeliveryLearnedCount >= DELIVERY_STYLE_LEARNING_INTERVAL)
-    ) {
-      scheduleSessionDeliveryStyleLearning(ctx, { force: pendingForce });
-    }
-  };
-
-  void trackPrivateDataTask(learningEpoch, () => scheduleDeliveryStyleLearning({
-    tenantId: ctx.tenantId,
-    repId: ctx.repId,
-    observations,
-    upsert: async (facts) => learningEpoch === privateDataEpoch
-      ? upsertMemoryFacts(facts)
-      : { inserted: 0, updated: 0, total: 0 },
-    onComplete: (result) => {
-      emitLog({
-        tenantId: ctx.tenantId,
-        repId: ctx.repId,
-        session_id: ctx.sessionId,
-        service: "delivery_style_learning",
-        eventType: "delivery_style_learning_complete",
-        data: {
-          status: result.status,
-          observations: result.observations,
-          acceptedFacts: result.acceptedFacts,
-          inserted: result.inserted,
-          updated: result.updated
-        }
-      });
-      finish();
-    },
-    onError: (error) => {
-      emitLog({
-        tenantId: ctx.tenantId,
-        repId: ctx.repId,
-        session_id: ctx.sessionId,
-        service: "delivery_style_learning",
-        eventType: "delivery_style_learning_error",
-        level: "WARN",
-        data: safeLearningErrorData(error)
-      });
-      finish();
-    }
-  }));
-}
-
 function recordDeliveryStyleObservation(
   ctx: SessionCtx,
   actual: string,
   turnSeq: number,
   at: string
-): void {
-  if (ctx.dataEpoch !== privateDataEpoch) return;
+): StyleObservationSourceV2 {
+  if (ctx.dataEpoch !== privateDataEpoch) return "owner_spontaneous";
   const suggestion = ctx.pendingFinalSuggestion;
-  if (!suggestion || suggestion.leadSeq !== ctx.latestLeadSeq) return;
+  if (!suggestion || suggestion.leadSeq !== ctx.latestLeadSeq) return "owner_spontaneous";
   const suggestionAgeMs = Date.now() - Date.parse(suggestion.at);
   if (!Number.isFinite(suggestionAgeMs) || suggestionAgeMs < 0 || suggestionAgeMs > 10 * 60_000) {
     ctx.pendingFinalSuggestion = undefined;
     guidanceFeedbackStore.clearSession(ctx.sessionId);
-    return;
+    return "owner_spontaneous";
   }
   const feedback = guidanceFeedbackStore.takeForOwnerTurn(
     ctx.sessionId,
     suggestion.guidanceId
   );
   ctx.pendingFinalSuggestion = undefined;
-  if (feedback?.status === "ignored") return;
+  if (feedback?.status === "ignored") return "owner_spontaneous";
 
   const observation = createDeliveryStyleObservation({
     sessionId: ctx.sessionId,
@@ -494,7 +411,10 @@ function recordDeliveryStyleObservation(
     },
     observationCount: ctx.deliveryStyleObservations.length
   });
-  scheduleSessionDeliveryStyleLearning(ctx);
+  return feedback?.status === "accepted" ||
+    observation.comparison.classification === "exact"
+    ? "guidance_accepted"
+    : "guidance_changed";
 }
 
 const app = express();
@@ -503,6 +423,10 @@ const sessions = new Map<string, SessionCtx>();
 const socketsBySession = new Map<string, Set<any>>();
 let totalWsConnections = 0;
 const wsConnectionsByIp = new Map<string, number>();
+const slowStyleLearner = new SlowStyleLearnerV2({
+  directory: CONFIG.sessionLogDir,
+  upsert: upsertMemoryFacts
+});
 const speakerService = createSpeakerServiceClient({
   // Local development needs no repeated setup; Docker overrides this with the
   // private service hostname on the Compose network.
@@ -1110,7 +1034,7 @@ app.get("/api/runtime/status", requireAuth, asyncRoute(async (_req, res) => {
         learningIntervalTurns: CONVERSATION_LEARNING_TURN_INTERVAL,
         automaticDeliveryComparison: true,
         automaticSpeakingStyleLearning: true,
-        deliveryLearningMinimumPairs: MIN_DELIVERY_STYLE_OBSERVATIONS
+        deliveryLearningMinimumPairs: MIN_STYLE_OBSERVATIONS_V2
       },
       google: {
         configured: google.configured,
@@ -1481,7 +1405,23 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
   });
 
   if (speaker === "rep") {
-    recordDeliveryStyleObservation(ctx, text, turnSeq, now);
+    const styleSource = recordDeliveryStyleObservation(ctx, text, turnSeq, now);
+    void trackPrivateDataTask(ctx.dataEpoch, () => slowStyleLearner.observe({
+      sessionId: ctx.sessionId,
+      turnId: `turn-${turnSeq}`,
+      text,
+      source: styleSource
+    })).catch((error: unknown) => {
+      emitLog({
+        tenantId: ctx.tenantId,
+        repId: ctx.repId,
+        session_id: ctx.sessionId,
+        service: "slow_style_learning",
+        eventType: "slow_style_observation_error",
+        level: "WARN",
+        data: safeLearningErrorData(error)
+      });
+    });
   }
 
   // Speaker identity is fail-closed: owner and unknown turns never trigger
@@ -1829,11 +1769,7 @@ wss.on("connection", (ws, request) => {
         learningPendingForce: false,
         completedPlaybookStageIds: [],
         guidance: new SessionGuidanceV2(),
-        deliveryStyleObservations: [],
-        deliveryLearningInFlight: false,
-        deliveryLearningPending: false,
-        deliveryLearningPendingForce: false,
-        lastDeliveryLearnedCount: 0
+        deliveryStyleObservations: []
       };
       // A companion joins the live session's existing brief; it must not replace
       // the audio host's mode/company/goal with stale phone-local defaults.
@@ -1876,30 +1812,6 @@ wss.on("connection", (ws, request) => {
             playbookStageId: greeting.id
           }
         );
-        // Load only the bounded, already-redacted tail. Two historical pairs
-        // plus the first new pair are enough to trigger cross-session learning.
-        void trackPrivateDataTask(ctx.dataEpoch, () => readRecentDeliveryStyleObservations()).then((recent) => {
-          if (!recent || ctx.dataEpoch !== privateDataEpoch) return;
-          const observationsAlreadyInMemory = [...ctx.deliveryStyleObservations];
-          const byId = new Map(recent.map((item) => [item.id, item]));
-          for (const item of observationsAlreadyInMemory) byId.set(item.id, item);
-          ctx.deliveryStyleObservations = [...byId.values()];
-          ctx.lastDeliveryLearnedCount = Math.max(
-            0,
-            ctx.deliveryStyleObservations.length - 2 - observationsAlreadyInMemory.length
-          );
-          scheduleSessionDeliveryStyleLearning(ctx);
-        }).catch((error: unknown) => {
-          emitLog({
-            tenantId: ctx.tenantId,
-            repId: ctx.repId,
-            session_id: ctx.sessionId,
-            service: "delivery_style_learning",
-            eventType: "delivery_observation_read_error",
-            level: "WARN",
-            data: safeLearningErrorData(error)
-          });
-        });
       } else if (ctx.lastCoachingMessage) {
         // A phone companion that joins mid-call should immediately see the same
         // exact line as the audio host instead of waiting for another turn.
@@ -1949,9 +1861,7 @@ wss.on("connection", (ws, request) => {
       }
       const ctx = sessions.get(sessionId);
       if (ctx) {
-        ctx.guidance.cancel("session_stopped");
         scheduleConversationLearning(ctx, { force: true });
-        scheduleSessionDeliveryStyleLearning(ctx, { force: true });
       }
       return;
     }
@@ -1970,8 +1880,8 @@ wss.on("connection", (ws, request) => {
       }
       const ctx = sessions.get(sessionId);
       if (ctx) {
+        ctx.guidance.cancel("session_stopped");
         scheduleConversationLearning(ctx, { force: true });
-        scheduleSessionDeliveryStyleLearning(ctx, { force: true });
       }
       sessions.delete(sessionId);
       socketsBySession.get(sessionId)?.delete(ws);
@@ -2027,7 +1937,6 @@ wss.on("connection", (ws, request) => {
         if (ctx) {
           ctx.guidance.cancel("all_clients_disconnected");
           scheduleConversationLearning(ctx, { force: true });
-          scheduleSessionDeliveryStyleLearning(ctx, { force: true });
         }
         socketsBySession.delete(sid);
       }
@@ -2129,7 +2038,6 @@ const sessionCleanupTimer = setInterval(() => {
     if (now - ctx.lastActivity > CONFIG.sessionTimeoutMs) {
       ctx.guidance.cancel("session_timeout");
       scheduleConversationLearning(ctx, { force: true });
-      scheduleSessionDeliveryStyleLearning(ctx, { force: true });
       sessions.delete(sid);
       const socks = socketsBySession.get(sid);
       if (socks) {
@@ -2163,7 +2071,6 @@ async function gracefulShutdown(signal: string) {
   // Start final learning snapshots without delaying shutdown on a deep-model call.
   for (const ctx of sessions.values()) {
     scheduleConversationLearning(ctx, { force: true });
-    scheduleSessionDeliveryStyleLearning(ctx, { force: true });
   }
   googleSync?.stopBackgroundSync();
 
