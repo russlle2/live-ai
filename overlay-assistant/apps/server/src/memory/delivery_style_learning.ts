@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import fs from "node:fs/promises";
 import path from "node:path";
 import type OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import { CONFIG } from "../config.js";
 import { getOpenAIClient, openAISafetyIdentifier } from "../openai/client.js";
+import { EncryptedJsonlArchiveV2 } from "../storage/encrypted_jsonl_archive_v2.js";
 import { upsertMemoryFacts, type MemoryFactInput } from "./personal_memory.js";
 
 export const MIN_DELIVERY_STYLE_OBSERVATIONS = 3;
@@ -13,7 +13,6 @@ export const MAX_DELIVERY_STYLE_OBSERVATIONS = 8;
 const MAX_EXCERPT_CHARS = 700;
 const MAX_DIFFERENCE_WORDS = 12;
 const MAX_STYLE_FACTS = 5;
-const MAX_OBSERVATION_READ_BYTES = 512 * 1024;
 
 export type DeliveryMatchClassification = "exact" | "paraphrased" | "changed";
 
@@ -281,7 +280,10 @@ export function createDeliveryStyleObservation(params: {
   });
 }
 
-let observationWriteQueue = Promise.resolve();
+const observationArchives = new Map<
+  string,
+  { encryptionKey: string; archive: EncryptedJsonlArchiveV2<DeliveryStyleObservation> }
+>();
 
 export function defaultDeliveryStyleObservationPath(): string {
   return path.join(CONFIG.sessionLogDir, "delivery_style_observations.jsonl");
@@ -290,18 +292,14 @@ export function defaultDeliveryStyleObservationPath(): string {
 /** Append one already-redacted observation to a private 0600 JSONL file. */
 export async function appendDeliveryStyleObservation(
   observation: DeliveryStyleObservation,
-  options: { filePath?: string } = {}
+  options: { filePath?: string; encryptionKey?: string } = {}
 ): Promise<string> {
   const safeObservation = DeliveryStyleObservationSchema.parse(observation);
   const target = options.filePath ?? defaultDeliveryStyleObservationPath();
-  observationWriteQueue = observationWriteQueue.catch(() => {}).then(async () => {
-    const directory = path.dirname(target);
-    await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-    await fs.chmod(directory, 0o700);
-    await fs.appendFile(target, `${JSON.stringify(safeObservation)}\n`, { mode: 0o600 });
-    await fs.chmod(target, 0o600);
-  });
-  await observationWriteQueue;
+  await deliveryObservationArchive(
+    target,
+    options.encryptionKey ?? CONFIG.privateStorageEncryptionKey
+  ).append(safeObservation);
   return target;
 }
 
@@ -312,42 +310,33 @@ export async function appendDeliveryStyleObservation(
 export async function readRecentDeliveryStyleObservations(options: {
   filePath?: string;
   limit?: number;
+  encryptionKey?: string;
 } = {}): Promise<DeliveryStyleObservation[]> {
   const target = options.filePath ?? defaultDeliveryStyleObservationPath();
   const limit = Math.min(
     MAX_DELIVERY_STYLE_OBSERVATIONS,
     Math.max(1, Math.floor(options.limit ?? MAX_DELIVERY_STYLE_OBSERVATIONS))
   );
-  let handle: fs.FileHandle | undefined;
-  try {
-    handle = await fs.open(target, "r");
-    const stat = await handle.stat();
-    const bytesToRead = Math.min(stat.size, MAX_OBSERVATION_READ_BYTES);
-    const start = Math.max(0, stat.size - bytesToRead);
-    const buffer = Buffer.alloc(bytesToRead);
-    await handle.read(buffer, 0, bytesToRead, start);
-    let text = buffer.toString("utf8");
-    if (start > 0) {
-      const firstNewline = text.indexOf("\n");
-      text = firstNewline >= 0 ? text.slice(firstNewline + 1) : "";
-    }
+  return deliveryObservationArchive(
+    target,
+    options.encryptionKey ?? CONFIG.privateStorageEncryptionKey
+  ).readRecent(limit);
+}
 
-    const observations: DeliveryStyleObservation[] = [];
-    for (const line of text.split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        observations.push(DeliveryStyleObservationSchema.parse(JSON.parse(line)));
-      } catch {
-        // A malformed private-log line is isolated to that line.
-      }
-    }
-    return observations.slice(-limit);
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
-    throw error;
-  } finally {
-    await handle?.close();
-  }
+function deliveryObservationArchive(
+  filePath: string,
+  encryptionKey: string
+): EncryptedJsonlArchiveV2<DeliveryStyleObservation> {
+  const cached = observationArchives.get(filePath);
+  if (cached?.encryptionKey === encryptionKey) return cached.archive;
+  const archive = new EncryptedJsonlArchiveV2<DeliveryStyleObservation>({
+    filePath,
+    encryptionKey,
+    validate: (value) => DeliveryStyleObservationSchema.parse(value),
+    malformedLinePolicy: "skip"
+  });
+  observationArchives.set(filePath, { encryptionKey, archive });
+  return archive;
 }
 
 export const DeliveryStylePatternSchema = z.enum([

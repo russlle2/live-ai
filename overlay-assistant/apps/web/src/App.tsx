@@ -14,6 +14,7 @@ import type {
 } from "@overlay-assistant/shared";
 import { buildConversationPlaybookV1, DEFAULT_SESSION_PROFILE_V1, SCENARIO_MODES_V1, sanitizePatch_v1 } from "@overlay-assistant/shared";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ArchiveSearchPanel } from "./components/ArchiveSearchPanel";
 import { MemoryReviewPanel } from "./components/MemoryReviewPanel";
 import { OverlayPreview } from "./components/OverlayPreview";
 import { useToast } from "./components/Toast";
@@ -165,6 +166,7 @@ export function App() {
   const [elapsed, setElapsed] = useState("0:00");
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [archiveSearchOpen, setArchiveSearchOpen] = useState(false);
   const [memoryReviewOpen, setMemoryReviewOpen] = useState(false);
   const [accessCode, setAccessCode] = useState(() => sessionStorage.getItem(ACCESS_CODE_SESSION_KEY) || "");
   const [localBootstrapCode, setLocalBootstrapCode] = useState<string | null>(null);
@@ -584,6 +586,7 @@ export function App() {
       setDeliveryObservations([]);
       setAutomation(null);
       setActiveGuidanceId(null);
+      setArchiveSearchOpen(false);
       setMemoryReviewOpen(false);
       setAuthToken(null);
       tokenRef.current = null;
@@ -891,6 +894,7 @@ export function App() {
           <span>Transcripts</span>
           <strong>Capture + delivery learning on</strong>
           <small>{deliveryObservations.length > 0 ? `${deliveryObservations.length} speaking comparisons this session` : "Learns memory every 6 turns"}</small>
+          <button type="button" onClick={() => setArchiveSearchOpen(true)}>Search archive</button>
         </div>
         <div className={`automation-item ${automation?.google.authorized ? "automation-item--ready" : "automation-item--warning"}`}>
           <span>Gmail + Drive</span>
@@ -1135,6 +1139,15 @@ export function App() {
             getAuthToken={ensureAuth}
             onClose={() => setMemoryReviewOpen(false)}
             onFactsChanged={refreshAutomation}
+          />
+        </ErrorBoundary>
+      )}
+      {archiveSearchOpen && (
+        <ErrorBoundary>
+          <ArchiveSearchPanel
+            httpBase={httpBase}
+            getAuthToken={ensureAuth}
+            onClose={() => setArchiveSearchOpen(false)}
           />
         </ErrorBoundary>
       )}

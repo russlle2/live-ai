@@ -195,6 +195,32 @@ export async function getMemoryFacts(
   };
 }
 
+export type TranscriptArchiveResult = {
+  sessionId: string;
+  speaker: "rep" | "lead" | "unknown";
+  text: string;
+  at: string;
+  mode: string;
+  score: number;
+};
+
+export async function searchTranscriptArchive(
+  query: string,
+  httpBase?: string,
+  token?: string | null,
+  limit = 20
+): Promise<TranscriptArchiveResult[]> {
+  const params = new URLSearchParams({
+    q: query.trim(),
+    limit: String(limit)
+  });
+  const data = await requestJson<{
+    ok: true;
+    results?: TranscriptArchiveResult[];
+  }>(`/api/archive/search?${params}`, httpBase, { token });
+  return Array.isArray(data.results) ? data.results : [];
+}
+
 export async function verifyOrCorrectMemoryFact(
   fact: MemoryFactWriteInput,
   httpBase?: string,

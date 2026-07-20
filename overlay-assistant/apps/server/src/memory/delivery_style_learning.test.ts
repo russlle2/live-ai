@@ -20,6 +20,7 @@ import {
 } from "./delivery_style_learning.js";
 
 const temporaryDirectories: string[] = [];
+const styleEncryptionKey = "test-style-observation-encryption-key-at-least-32-characters";
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
@@ -137,12 +138,17 @@ describe("private style observation log", () => {
       actual: "My API key is sk-proj-abcdefghijklmnop."
     });
 
-    await appendDeliveryStyleObservation(item, { filePath: target });
+    await appendDeliveryStyleObservation(item, {
+      filePath: target,
+      encryptionKey: styleEncryptionKey
+    });
     const stored = await fs.readFile(target, "utf8");
     const stat = await fs.stat(target);
 
     expect(item.sessionRef).toBe("session:unsafe_session_id");
     expect(item.redactionsApplied).toBe(true);
+    expect(stored).toContain("private_encrypted_jsonl_record_v2");
+    expect(stored).not.toContain(item.suggestedExcerpt);
     expect(stored).not.toContain("sk-proj-abcdefghijklmnop");
     expect(stat.mode & 0o777).toBe(0o600);
   });
@@ -152,11 +158,18 @@ describe("private style observation log", () => {
     temporaryDirectories.push(directory);
     const target = path.join(directory, "observations.jsonl");
     for (let index = 0; index < 10; index += 1) {
-      await appendDeliveryStyleObservation(observation(index), { filePath: target });
+      await appendDeliveryStyleObservation(observation(index), {
+        filePath: target,
+        encryptionKey: styleEncryptionKey
+      });
     }
     await fs.appendFile(target, "{not-json}\n");
 
-    const recent = await readRecentDeliveryStyleObservations({ filePath: target, limit: 99 });
+    const recent = await readRecentDeliveryStyleObservations({
+      filePath: target,
+      limit: 99,
+      encryptionKey: styleEncryptionKey
+    });
 
     expect(recent).toHaveLength(8);
     expect(recent[0]?.sessionRef).toBe("session:session-2");

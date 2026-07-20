@@ -4,6 +4,7 @@ import path from "node:path";
 import { z } from "zod";
 import type { ScenarioModeV1, SessionProfileV1 } from "@overlay-assistant/shared";
 import { CONFIG } from "../config.js";
+import { EncryptedJsonlArchiveV2 } from "../storage/encrypted_jsonl_archive_v2.js";
 
 export const MemoryFactSchema = z.object({
   id: z.string().min(1),
@@ -54,6 +55,31 @@ const MemoryFileSchema = z.object({
 
 type MemoryFile = z.infer<typeof MemoryFileSchema>;
 let writeQueue = Promise.resolve();
+
+const SessionTurnSchema = z.object({
+  schema: z.literal("session_turn_v1"),
+  sessionId: z.string().min(1).max(240),
+  speaker: z.enum(["rep", "lead", "unknown"]),
+  text: z.string().min(1).max(20_000),
+  at: z.string().max(100),
+  mode: z.enum([
+    "interview",
+    "insurance_sales",
+    "it_support",
+    "inbound_service",
+    "negotiation",
+    "general"
+  ]),
+  captureProvenance: z.string().max(100).optional(),
+  attributionConfidence: z.number().min(0).max(1).optional(),
+  attributionReason: z.string().max(160).optional()
+}).strict();
+
+export type SessionTurn = z.infer<typeof SessionTurnSchema>;
+const sessionArchives = new Map<
+  string,
+  { encryptionKey: string; archive: EncryptedJsonlArchiveV2<SessionTurn> }
+>();
 
 function emptyMemory(): MemoryFile {
   return {
@@ -190,6 +216,7 @@ export async function clearGoogleMemoryFacts(): Promise<{ removed: number; total
 }
 
 export async function clearSessionLogs(): Promise<{ removedFiles: number }> {
+  sessionArchives.clear();
   let entries: Array<{ name: string; isFile: () => boolean }> = [];
   try {
     entries = await fs.readdir(CONFIG.sessionLogDir, { withFileTypes: true });
@@ -387,10 +414,91 @@ export async function appendSessionTurn(params: {
   attributionConfidence?: number;
   attributionReason?: string;
 }): Promise<void> {
-  await fs.mkdir(CONFIG.sessionLogDir, { recursive: true, mode: 0o700 });
-  await fs.chmod(CONFIG.sessionLogDir, 0o700);
-  const safeId = params.sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 120);
+  const turn = SessionTurnSchema.parse({ schema: "session_turn_v1", ...params });
+  await sessionArchive(params.sessionId).append(turn);
+}
+
+export async function readSessionTurns(sessionId: string): Promise<SessionTurn[]> {
+  return sessionArchive(sessionId).readAll();
+}
+
+export type SessionTurnSearchResult = SessionTurn & { score: number };
+
+export async function searchSessionTurns(params: {
+  query: string;
+  limit?: number;
+}): Promise<SessionTurnSearchResult[]> {
+  const query = params.query.normalize("NFKC").trim().slice(0, 500);
+  const queryTerms = terms(query);
+  if (queryTerms.size === 0) return [];
+  const limit = Math.max(1, Math.min(params.limit ?? 20, 100));
+  let entries: Array<{ name: string; isFile: () => boolean }>;
+  try {
+    entries = await fs.readdir(CONFIG.sessionLogDir, { withFileTypes: true });
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    throw error;
+  }
+
+  const ignored = new Set([
+    "delivery_style_observations.jsonl",
+    "style_feature_observations_v2.jsonl"
+  ]);
+  const results: SessionTurnSearchResult[] = [];
+  for (const entry of entries
+    .filter((candidate) =>
+      candidate.isFile() &&
+      candidate.name.endsWith(".jsonl") &&
+      !ignored.has(candidate.name)
+    )
+    .sort((left, right) => left.name.localeCompare(right.name))) {
+    const target = path.join(CONFIG.sessionLogDir, entry.name);
+    const turns = await sessionArchiveForPath(target).readAll();
+    for (const turn of turns) {
+      const turnTerms = terms(turn.text);
+      const matched = [...queryTerms].filter((term) => turnTerms.has(term)).length;
+      if (matched === 0) continue;
+      const phraseBonus = turn.text.toLowerCase().includes(query.toLowerCase()) ? 5 : 0;
+      results.push({
+        ...turn,
+        score: matched * 10 + phraseBonus
+      });
+    }
+  }
+  return results
+    .sort((left, right) =>
+      right.score - left.score ||
+      right.at.localeCompare(left.at) ||
+      left.sessionId.localeCompare(right.sessionId)
+    )
+    .slice(0, limit);
+}
+
+function sessionArchive(sessionId: string): EncryptedJsonlArchiveV2<SessionTurn> {
+  const safeId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 120);
+  if (!safeId) throw new TypeError("sessionId is required");
   const target = path.join(CONFIG.sessionLogDir, `${safeId}.jsonl`);
-  await fs.appendFile(target, `${JSON.stringify({ schema: "session_turn_v1", ...params })}\n`, { mode: 0o600 });
-  await fs.chmod(target, 0o600);
+  return sessionArchiveForPath(target);
+}
+
+function sessionArchiveForPath(
+  target: string
+): EncryptedJsonlArchiveV2<SessionTurn> {
+  const cached = sessionArchives.get(target);
+  if (
+    cached &&
+    cached.encryptionKey === CONFIG.privateStorageEncryptionKey
+  ) {
+    return cached.archive;
+  }
+  const archive = new EncryptedJsonlArchiveV2<SessionTurn>({
+    filePath: target,
+    encryptionKey: CONFIG.privateStorageEncryptionKey,
+    validate: (value) => SessionTurnSchema.parse(value)
+  });
+  sessionArchives.set(target, {
+    encryptionKey: CONFIG.privateStorageEncryptionKey,
+    archive
+  });
+  return archive;
 }

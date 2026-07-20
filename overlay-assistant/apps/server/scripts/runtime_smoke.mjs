@@ -24,6 +24,7 @@ const server = spawn(process.execPath, ["dist/index.js"], {
     ALLOW_INSECURE_DEMO_AUTH: "0",
     JWT_SECRET: "runtime-smoke-only-jwt-secret-at-least-32-characters",
     PERSONAL_ACCESS_CODE: smokeAccessCode,
+    PRIVATE_STORAGE_ENCRYPTION_KEY: "runtime-smoke-private-storage-key-at-least-32-characters",
     OPENAI_API_KEY: "",
     GOOGLE_CLIENT_ID: "",
     GOOGLE_CLIENT_SECRET: "",

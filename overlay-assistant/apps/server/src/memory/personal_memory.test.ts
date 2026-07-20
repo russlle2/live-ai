@@ -4,13 +4,24 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CONFIG } from "../config.js";
 import type { MemoryFact } from "./personal_memory.js";
-import { clearMemoryFile, rankMemoryFacts, removeGoogleSourceFactsForSource } from "./personal_memory.js";
+import {
+  appendSessionTurn,
+  clearMemoryFile,
+  rankMemoryFacts,
+  readSessionTurns,
+  removeGoogleSourceFactsForSource,
+  searchSessionTurns
+} from "./personal_memory.js";
 
 const originalMemoryPath = CONFIG.personalMemoryPath;
+const originalSessionLogDir = CONFIG.sessionLogDir;
+const originalPrivateStorageKey = CONFIG.privateStorageEncryptionKey;
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   CONFIG.personalMemoryPath = originalMemoryPath;
+  CONFIG.sessionLogDir = originalSessionLogDir;
+  CONFIG.privateStorageEncryptionKey = originalPrivateStorageKey;
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
     fs.rm(directory, { recursive: true, force: true })
   ));
@@ -193,5 +204,69 @@ describe("personal memory retrieval", () => {
     expect(after).toMatchObject({ schema: "personal_memory_v1", facts: [] });
     expect((await fs.stat(CONFIG.personalMemoryPath)).mode & 0o777).toBe(0o600);
     await expect(fs.stat(crashTemp)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("encrypted transcript archive", () => {
+  it("retains transcript turns indefinitely without plaintext at rest", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "live-rhetoric-transcripts-"));
+    temporaryDirectories.push(directory);
+    CONFIG.sessionLogDir = directory;
+    CONFIG.privateStorageEncryptionKey = "test-transcript-encryption-key-at-least-32-characters";
+
+    await appendSessionTurn({
+      sessionId: "encrypted-session",
+      speaker: "lead",
+      text: "A private client conversation detail.",
+      at: "2026-07-20T18:00:00.000Z",
+      mode: "general",
+      captureProvenance: "dedicated_browser_tab",
+      attributionConfidence: 1
+    });
+
+    const target = path.join(directory, "encrypted-session.jsonl");
+    const raw = await fs.readFile(target, "utf8");
+    expect(raw).toContain("private_encrypted_jsonl_record_v2");
+    expect(raw).not.toContain("private client conversation detail");
+    await expect(readSessionTurns("encrypted-session")).resolves.toEqual([
+      expect.objectContaining({
+        schema: "session_turn_v1",
+        speaker: "lead",
+        text: "A private client conversation detail."
+      })
+    ]);
+  });
+
+  it("searches decrypted archives locally with source-linked results", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "live-rhetoric-search-"));
+    temporaryDirectories.push(directory);
+    CONFIG.sessionLogDir = directory;
+    CONFIG.privateStorageEncryptionKey = "test-transcript-search-key-at-least-32-characters";
+
+    await appendSessionTurn({
+      sessionId: "client-call",
+      speaker: "lead",
+      text: "The client decided that reliability is the main priority.",
+      at: "2026-07-20T18:00:00.000Z",
+      mode: "general"
+    });
+    await appendSessionTurn({
+      sessionId: "interview",
+      speaker: "lead",
+      text: "The interviewer asked about conflict resolution.",
+      at: "2026-07-20T19:00:00.000Z",
+      mode: "interview"
+    });
+
+    await expect(searchSessionTurns({
+      query: "client reliability priority",
+      limit: 5
+    })).resolves.toEqual([
+      expect.objectContaining({
+        sessionId: "client-call",
+        speaker: "lead",
+        score: expect.any(Number)
+      })
+    ]);
   });
 });

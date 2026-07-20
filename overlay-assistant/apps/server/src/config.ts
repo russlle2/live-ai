@@ -201,6 +201,10 @@ export const CONFIG = {
   authAutoBootstrapped: false,
   personalMemoryPath: resolveOverlayPath(process.env.PERSONAL_MEMORY_PATH ?? "data/private/personal_memory.local.json"),
   sessionLogDir: resolveOverlayPath(process.env.SESSION_LOG_DIR ?? "data/private/sessions"),
+  privateStorageEncryptionKey:
+    process.env.PRIVATE_STORAGE_ENCRYPTION_KEY ??
+    process.env.GOOGLE_STORAGE_ENCRYPTION_KEY ??
+    "",
   memoryMaxPromptFacts: boundedEnvInteger("MEMORY_MAX_PROMPT_FACTS", 12, 1, 100),
   coachingCorpusPaths: (process.env.COACHING_CORPUS_PATHS ?? process.env.COACHING_CORPUS_PATH ?? defaultCoachingCorpusPaths.join(","))
     .split(",")

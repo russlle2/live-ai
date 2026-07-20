@@ -1,5 +1,5 @@
 import http from "http";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -86,6 +86,7 @@ import {
   readMemoryFile,
   replaceGoogleSourceFacts,
   retrieveMemoryFacts,
+  searchSessionTurns,
   upsertMemoryFacts,
   type MemoryFactInput
 } from "./memory/personal_memory.js";
@@ -131,6 +132,17 @@ CONFIG.personalAccessCode = authBootstrap.personalAccessCode;
 CONFIG.authAutoBootstrapped = authBootstrap.managed;
 if (CONFIG.googleStorageEncryptionKey.length < 32 && authBootstrap.managed) {
   CONFIG.googleStorageEncryptionKey = authBootstrap.storageEncryptionKey;
+}
+if (CONFIG.privateStorageEncryptionKey.length < 32 && authBootstrap.managed) {
+  CONFIG.privateStorageEncryptionKey = authBootstrap.storageEncryptionKey;
+}
+if (CONFIG.privateStorageEncryptionKey.length < 32 && CONFIG.allowInsecureDemoAuth) {
+  CONFIG.privateStorageEncryptionKey = randomBytes(48).toString("base64url");
+}
+if (CONFIG.privateStorageEncryptionKey.length < 32) {
+  throw new Error(
+    "PRIVATE_STORAGE_ENCRYPTION_KEY must contain at least 32 characters when authentication is environment-managed"
+  );
 }
 if (CONFIG.allowInsecureDemoAuth && !isSafeLoopbackDemoBinding({
   host: CONFIG.host,
@@ -876,6 +888,16 @@ const MemorySearchQuery = z.object({
   preContext: z.string().max(5000).optional(),
   limit: z.coerce.number().int().min(1).max(50).optional().default(12)
 });
+const ArchiveSearchQuery = z.object({
+  q: z.string().trim().min(2).max(500),
+  limit: z.coerce.number().int().min(1).max(100).optional().default(20)
+});
+const archiveSearchRateLimit = createRouteRateLimit({
+  key: "archive_search",
+  max: 60,
+  windowMs: 60_000,
+  keySelector: (req) => req.auth?.repId ?? req.ip ?? "unknown_user"
+});
 
 app.get("/api/memory/stats", requireAuth, asyncRoute(async (_req, res) => {
   return sendOk(res, { stats: await getMemoryStats() });
@@ -900,6 +922,21 @@ app.get("/api/memory/search", requireAuth, asyncRoute(async (req, res) => {
   const { q, limit, ...profile } = parsed.data;
   const facts = await retrieveMemoryFacts({ query: q, profile, limit });
   return sendOk(res, { facts, total: facts.length });
+}));
+
+app.get("/api/archive/search", requireAuth, archiveSearchRateLimit, asyncRoute(async (req, res) => {
+  if (privateDataPurgeActive) {
+    return sendErr(res, 409, "private_data_purge_in_progress");
+  }
+  const parsed = ArchiveSearchQuery.safeParse(req.query);
+  if (!parsed.success) {
+    return sendErr(res, 400, "validation_error", "Invalid archive search", parsed.error.flatten());
+  }
+  const results = await searchSessionTurns({
+    query: parsed.data.q,
+    limit: parsed.data.limit
+  });
+  return sendOk(res, { results, total: results.length });
 }));
 
 app.post("/api/memory/facts", requireAuth, asyncRoute(async (req, res) => {
@@ -1217,6 +1254,7 @@ app.delete("/api/private-data", requireAuth, asyncRoute(async (req, res) => {
         CONFIG.jwtSecret = rotated.jwtSecret;
         CONFIG.personalAccessCode = rotated.personalAccessCode;
         CONFIG.googleStorageEncryptionKey = rotated.storageEncryptionKey;
+        CONFIG.privateStorageEncryptionKey = rotated.storageEncryptionKey;
         googleSync?.rotateStorageEncryptionKey(rotated.storageEncryptionKey);
         result.auth = { rotated: true, storageEncryptionKeyRotated: true };
       } else {
