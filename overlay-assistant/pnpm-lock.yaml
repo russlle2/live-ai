@@ -115,6 +115,15 @@ importers:
         specifier: ^2.0.5
         version: 2.1.9(@types/node@22.19.11)
 
+  packages/runtime:
+    devDependencies:
+      typescript:
+        specifier: ^5.6.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.0.5
+        version: 2.1.9(@types/node@22.19.11)
+
   packages/shared:
     devDependencies:
       '@types/node':
