@@ -687,6 +687,32 @@ button:disabled { cursor: not-allowed; opacity: 0.48; }
 .btn-luxury { border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; background: var(--surface-2); color: var(--ink); font-weight: 750; }
 .btn-luxury--primary { border-color: transparent; background: var(--mint); color: #05120d; }
 
+/* Browser-native always-on-top guidance window */
+.pip-guidance-body {
+  min-width: 0;
+  min-height: 100vh;
+  overflow: auto;
+  background: #07100e;
+}
+.pip-guidance-shell { min-height: 100vh; padding: 12px; }
+.pip-guidance-shell > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 9px;
+  color: var(--muted);
+  font-size: .65rem;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.pip-guidance-shell > header span { color: var(--mint); font-weight: 900; }
+.pip-guidance-shell .suggestion-card { border-radius: 15px; padding: 17px; }
+.pip-guidance-shell .suggestion-card blockquote { font-size: clamp(1.15rem, 5vw, 1.8rem); line-height: 1.25; }
+.pip-guidance-shell .suggestion-note { margin-top: 12px; font-size: .67rem; }
+.pip-guidance-shell .suggestion-empty { min-height: 180px; }
+.pip-guidance-shell .conversation-path { display: none; }
+
 @keyframes pulse { 50% { opacity: .35; } }
 @keyframes bars { 0%, 100% { height: 11px; opacity: .45; } 50% { height: 34px; opacity: 1; } }
 

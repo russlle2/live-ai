@@ -1,4 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { RuntimeEventV2 } from "@overlay-assistant/runtime";
 import type {
   CoachingDeliveryV1,
@@ -29,6 +30,10 @@ import {
   type RuntimeAutomationStatus
 } from "./lib/api";
 import { chooseCushion } from "./lib/cushions";
+import {
+  documentPipSupported,
+  openGuidancePip
+} from "./lib/documentPip";
 import {
   useSeparatedRealtimeTranscription,
   type AudioSource,
@@ -165,6 +170,7 @@ export function App() {
   const [sessionStart, setSessionStart] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState("0:00");
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [pipWindow, setPipWindow] = useState<Window | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [archiveSearchOpen, setArchiveSearchOpen] = useState(false);
   const [memoryReviewOpen, setMemoryReviewOpen] = useState(false);
@@ -184,6 +190,7 @@ export function App() {
   });
 
   const { httpBase, wsUrl } = useMemo(apiLocations, []);
+  const pipSupported = useMemo(() => documentPipSupported(window), []);
   const conversationPlaybook = useMemo(() => buildConversationPlaybookV1(profile), [profile]);
   const { addToast, ToastContainer } = useToast();
   const wsRef = useRef<WebSocket | null>(null);
@@ -586,6 +593,8 @@ export function App() {
       setDeliveryObservations([]);
       setAutomation(null);
       setActiveGuidanceId(null);
+      if (pipWindow && !pipWindow.closed) pipWindow.close();
+      setPipWindow(null);
       setArchiveSearchOpen(false);
       setMemoryReviewOpen(false);
       setAuthToken(null);
@@ -607,7 +616,7 @@ export function App() {
     } finally {
       setPurgeBusy(false);
     }
-  }, [ensureAuth, httpBase, purgeBusy, realtime]);
+  }, [ensureAuth, httpBase, pipWindow, purgeBusy, realtime]);
 
   useEffect(() => {
     return () => {
@@ -673,6 +682,32 @@ export function App() {
     await installPrompt.userChoice;
     setInstallPrompt(null);
   }, [installPrompt]);
+
+  const openFloatingGuidance = useCallback(async () => {
+    if (pipWindow && !pipWindow.closed) {
+      pipWindow.focus();
+      return;
+    }
+    try {
+      const nextWindow = await openGuidancePip();
+      nextWindow.addEventListener("pagehide", () => setPipWindow(null), {
+        once: true
+      });
+      setPipWindow(nextWindow);
+    } catch (pipError) {
+      setError(
+        pipError instanceof Error
+          ? pipError.message
+          : "Always-on-top guidance could not be opened."
+      );
+    }
+  }, [pipWindow]);
+
+  useEffect(() => {
+    return () => {
+      if (pipWindow && !pipWindow.closed) pipWindow.close();
+    };
+  }, [pipWindow]);
 
   const onShown = async (guidanceId: string) => {
     if (!guidanceId) return;
@@ -851,6 +886,7 @@ export function App() {
         <div className="header-actions">
           <span className={`connection connection--${wsStatus}`}><i />{wsStatus === "ready" ? "Live" : wsStatus === "connecting" ? "Connecting" : "Offline"}</span>
           <span className="elapsed" aria-label={`Session duration ${elapsed}`}>{elapsed}</span>
+          {pipSupported && <button className="quiet-button" onClick={() => void openFloatingGuidance()}>{pipWindow ? "Floating" : "Float"}</button>}
           {installPrompt && <button className="quiet-button" onClick={installApp}>Install</button>}
           <button className="quiet-button" onClick={() => setHelpOpen(true)}>Help</button>
           <button className="quiet-button" onClick={newSession}>New</button>
@@ -1150,6 +1186,24 @@ export function App() {
             onClose={() => setArchiveSearchOpen(false)}
           />
         </ErrorBoundary>
+      )}
+      {pipWindow && !pipWindow.closed && createPortal(
+        <main className="pip-guidance-shell" aria-label="Always-on-top response guidance">
+          <header>
+            <span>Live Rhetoric</span>
+            <strong>{SCENARIO_LABELS[profile.mode]}</strong>
+          </header>
+          <OverlayPreview
+            state={overlayState}
+            stage={suggestionStage}
+            guidanceId={activeGuidanceId ?? undefined}
+            onShown={async () => undefined}
+            onApply={onApply}
+            onDismiss={onDismiss}
+            onMuteToggle={onMuteToggle}
+          />
+        </main>,
+        pipWindow.document.body
       )}
     </div>
   );
