@@ -189,7 +189,36 @@ async function checkWebSocket(token) {
     interruptedTurnId: "turn-owner",
     interruptingTurnId: "turn-remote"
   });
+  await checkSecondAudioHostRejected(token);
   ws.send(JSON.stringify({ type: "stop", session_id: "runtime-smoke-session" }));
+  ws.close();
+}
+
+async function checkSecondAudioHostRejected(token) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error("second audio-host rejection timed out")),
+      2_000
+    );
+    ws.on("open", () => {
+      ws.send(JSON.stringify({
+        type: "start",
+        session_id: "runtime-smoke-session",
+        tenantId: "personal",
+        repId: "owner",
+        deviceRole: "audio_host",
+        token
+      }));
+    });
+    ws.on("message", (data) => {
+      const message = JSON.parse(String(data));
+      if (message.message !== "audio_host_already_connected") return;
+      clearTimeout(timeout);
+      resolve();
+    });
+    ws.on("error", reject);
+  });
   ws.close();
 }
 

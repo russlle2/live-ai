@@ -68,6 +68,7 @@ import {
 import { clearAllTokenUsage, getTenantUsageSummary, getAllTenantUsage, logTokenUsage } from "./middleware/token_usage.js";
 import { applySecurityHeaders, requestContext } from "./middleware/security.js";
 import { isAllowedWebSocketOrigin } from "./middleware/ws_origin.js";
+import { classifyWebSocketBackpressure } from "./middleware/ws_backpressure.js";
 import {
   isDirectLoopbackRequest,
   isSafeLoopbackDemoBinding,
@@ -99,6 +100,7 @@ import {
 import { SlowStyleLearnerV2 } from "./memory/slow_style_profile_v2.js";
 import { GuidanceFeedbackStoreV2 } from "./session/guidance_feedback_v2.js";
 import { SessionGuidanceV2 } from "./session/session_guidance_v2.js";
+import { SessionDeviceRegistryV2 } from "./session/session_device_registry_v2.js";
 import { createRealtimeTranscriptionClientSecret } from "./openai/realtime_token.js";
 import {
   getCoachingProviderConfig,
@@ -446,6 +448,7 @@ const app = express();
 const guidanceFeedbackStore = new GuidanceFeedbackStoreV2();
 const sessions = new Map<string, SessionCtx>();
 const socketsBySession = new Map<string, Set<any>>();
+const sessionDevices = new SessionDeviceRegistryV2<any>();
 let totalWsConnections = 0;
 const wsConnectionsByIp = new Map<string, number>();
 const slowStyleLearner = new SlowStyleLearnerV2({
@@ -820,6 +823,10 @@ app.get("/api/trust/summary", requireAuth, asyncRoute(async (req, res) => {
 }));
 
 const server = http.createServer(app);
+server.headersTimeout = 10_000;
+server.requestTimeout = 30_000;
+server.keepAliveTimeout = 5_000;
+server.maxRequestsPerSocket = 1_000;
 const wss = new WebSocketServer({
   server,
   path: CONFIG.wsPath,
@@ -1249,6 +1256,7 @@ app.delete("/api/private-data", requireAuth, asyncRoute(async (req, res) => {
   for (const session of sessions.values()) session.guidance.cancel("private_data_purge");
   sessions.clear();
   socketsBySession.clear();
+  result.connectedDeviceSessions = sessionDevices.clearAll();
   result.pendingGuidanceFeedback = guidanceFeedbackStore.clearAll();
   closeSocketsForPurge(activeSockets, "owner_private_data_purge");
 
@@ -1366,7 +1374,23 @@ function broadcast(sessionId: string, msg: WsServerMessageV1) {
   // Pre-serialize once for all sockets (avoids repeated JSON.stringify)
   const payload = JSON.stringify(msg);
   for (const ws of set) {
-    if (ws.readyState === ws.OPEN) ws.send(payload);
+    if (ws.readyState !== ws.OPEN) continue;
+    const backpressure = classifyWebSocketBackpressure(ws.bufferedAmount);
+    if (backpressure === "disconnect") {
+      ws.close(1013, "slow_consumer");
+      continue;
+    }
+    if (
+      backpressure === "coalesce" &&
+      (msg.type === "overlay_message" || msg.type === "delivery_observation")
+    ) {
+      continue;
+    }
+    try {
+      ws.send(payload);
+    } catch {
+      ws.close(1011, "send_failed");
+    }
   }
 }
 
@@ -1940,6 +1964,18 @@ wss.on("connection", (ws, request) => {
         guidance: new SessionGuidanceV2(),
         deliveryStyleObservations: []
       };
+      const deviceAdmission = sessionDevices.register(sessionId, ws, deviceRole);
+      if (!deviceAdmission.ok) {
+        ws.send(JSON.stringify({
+          type: "error",
+          at: new Date().toISOString(),
+          session_id: sessionId,
+          message: deviceAdmission.code,
+          code: "forbidden"
+        } satisfies WsServerMessageV1));
+        ws.close(1008, deviceAdmission.code);
+        return;
+      }
       // A companion joins the live session's existing brief; it must not replace
       // the audio host's mode/company/goal with stale phone-local defaults.
       if (!existing || deviceRole === "audio_host") {
@@ -2053,10 +2089,12 @@ wss.on("connection", (ws, request) => {
         scheduleConversationLearning(ctx, { force: true });
       }
       sessions.delete(sessionId);
-      socketsBySession.get(sessionId)?.delete(ws);
+      sessionDevices.clearSession(sessionId);
+      const sessionSockets = socketsBySession.get(sessionId);
+      socketsBySession.delete(sessionId);
       clearSessionRateLimit(sessionId);
       guidanceFeedbackStore.clearSession(sessionId);
-      await trackPrivateDataTask(
+      void trackPrivateDataTask(
         ctx?.dataEpoch ?? privateDataEpoch,
         () => endSession(sessionId)
       ).catch((error: unknown) => {
@@ -2070,7 +2108,9 @@ wss.on("connection", (ws, request) => {
           data: safeLearningErrorData(error)
         });
       });
-      ws.close();
+      for (const client of sessionSockets ?? []) {
+        if (client.readyState === client.OPEN) client.close(1000, "session_stopped");
+      }
       return;
     }
 
@@ -2101,6 +2141,7 @@ wss.on("connection", (ws, request) => {
     // Clean up socket from all session sets
     for (const [sid, socks] of socketsBySession.entries()) {
       socks.delete(ws);
+      sessionDevices.release(sid, ws);
       if (socks.size === 0) {
         const ctx = sessions.get(sid);
         if (ctx) {
@@ -2212,6 +2253,7 @@ const sessionCleanupTimer = setInterval(() => {
       ctx.guidance.cancel("session_timeout");
       scheduleConversationLearning(ctx, { force: true });
       sessions.delete(sid);
+      sessionDevices.clearSession(sid);
       const socks = socketsBySession.get(sid);
       if (socks) {
         for (const ws of socks) {
