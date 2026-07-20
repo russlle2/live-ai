@@ -39,6 +39,7 @@ import { arbitrateV1 } from "./arbitration/arbitration_v1.js";
 import { getAiCoaching, isAiCoachEnabled } from "./arbitration/ai_coach_v1.js";
 import {
   getDeterministicCushion,
+  selectDeterministicGuidance,
   shouldCoachSpeaker
 } from "./arbitration/live_fallback_v1.js";
 import {
@@ -1495,6 +1496,10 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
     completedStageIds: ctx.completedPlaybookStageIds
   });
   const playbookFallback = exactPlaybookLine(playbookStage.say);
+  const deterministicFallback = selectDeterministicGuidance(
+    decision.items,
+    playbookFallback
+  );
   const guidanceLease = ctx.guidance.beginTurn(
     `turn-${turnSeq}`,
     CONFIG.coachingFinalDeadlineMs
@@ -1525,7 +1530,7 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
       ) return;
       sendCoachingPatch(
         ctx,
-        playbookFallback,
+        deterministicFallback,
         new Date().toISOString(),
         guidanceId,
         {
@@ -1616,7 +1621,7 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
 
   const finalAt = new Date().toISOString();
   if (guidanceStatus === "expired") {
-    sendCoachingPatch(ctx, playbookFallback, finalAt, guidanceId, {
+    sendCoachingPatch(ctx, deterministicFallback, finalAt, guidanceId, {
       phase: "final",
       aiGenerated: false,
       category: "general",
@@ -1637,7 +1642,7 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
 
   const delivered = sendCoachingPatch(
     ctx,
-    aiResult?.coaching ?? playbookFallback,
+    aiResult?.coaching ?? deterministicFallback,
     finalAt,
     guidanceId,
     {

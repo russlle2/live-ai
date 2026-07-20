@@ -25,4 +25,22 @@ describe("sanitizePatch_v1", () => {
     const res = sanitizePatch_v1(raw);
     expect(res.ok).toBe(false);
   });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    "rejects non-finite numeric settings",
+    (value) => {
+      const onlyInvalid = sanitizePatch_v1({ settings: { opacity: value } });
+      expect(onlyInvalid.ok).toBe(false);
+
+      const withSafeText = sanitizePatch_v1({
+        text: "Keep this safe line.",
+        settings: { opacity: value }
+      });
+      expect(withSafeText.ok).toBe(true);
+      if (withSafeText.ok) {
+        expect(withSafeText.patch).toEqual({ text: "Keep this safe line." });
+        expect(withSafeText.droppedPaths).toContain("settings.opacity");
+      }
+    }
+  );
 });

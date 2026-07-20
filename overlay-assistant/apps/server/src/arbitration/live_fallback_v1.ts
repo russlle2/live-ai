@@ -44,3 +44,16 @@ export function getDeterministicCushion(mode: ScenarioModeV1): string {
 export function getDeterministicFallback(mode: ScenarioModeV1): string {
   return FALLBACKS[mode] ?? FALLBACKS.general;
 }
+
+/** Prefer turn-specific deterministic arbitration before a generic stage line. */
+export function selectDeterministicGuidance(
+  items: readonly { text: string }[],
+  playbookFallback: string
+): string {
+  const candidate = items.find((item) =>
+    typeof item.text === "string" &&
+    item.text.length <= 8_000 &&
+    /^say\s*:/i.test(item.text.trim())
+  )?.text.trim();
+  return candidate || playbookFallback;
+}

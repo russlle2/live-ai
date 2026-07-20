@@ -7,7 +7,7 @@ import {
   type SourceDocument
 } from "./types.js";
 import { PrivateJsonStore } from "./private_store.js";
-import { contentHash, sanitizeGoogleSourceTitle } from "./privacy.js";
+import { sanitizeGoogleSourceTitle } from "./privacy.js";
 
 export class GoogleSourceCapacityError extends Error {
   constructor(readonly limit: number) {
@@ -93,22 +93,7 @@ export class GoogleSourceCache {
 
   async markDeleted(sourceRef: string): Promise<void> {
     await this.mutate((cache) => {
-      const source = cache.sources[sourceRef];
-      if (!source) return;
-      const deletedAt = this.now().toISOString();
-      source.title = "";
-      source.timestamp = undefined;
-      source.mimeType = undefined;
-      source.webUrl = undefined;
-      source.text = "";
-      source.contentHash = contentHash("");
-      source.sensitivity = "normal";
-      source.reviewFlags = [];
-      source.extractedContentHash = undefined;
-      source.extractedFacts = [];
-      source.extractionReviewFlags = [];
-      source.deletedAt = deletedAt;
-      source.lastSeenAt = deletedAt;
+      delete cache.sources[sourceRef];
     });
   }
 

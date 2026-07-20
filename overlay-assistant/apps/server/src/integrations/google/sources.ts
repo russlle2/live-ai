@@ -602,7 +602,8 @@ const SUPPORTED_DRIVE_MIME_TYPES = [
   "application/xml",
   "application/yaml",
   "application/x-yaml",
-  "application/javascript"
+  "application/javascript",
+  "application/pdf"
 ] as const;
 
 export const DEFAULT_DRIVE_QUERY = `trashed = false and (${SUPPORTED_DRIVE_MIME_TYPES

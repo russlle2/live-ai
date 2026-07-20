@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   getDeterministicCushion,
   getDeterministicFallback,
+  selectDeterministicGuidance,
   shouldCoachSpeaker
 } from "./live_fallback_v1.js";
 import { TEMPLATE_RULES } from "./templates_v1.js";
@@ -26,5 +27,16 @@ describe("live coaching fallbacks", () => {
     expect(TEMPLATE_RULES.map((rule) => rule.text).join("\n")).not.toMatch(
       /3x return|SOC 2 report|plug right into|real results within|cut their process time in half/i
     );
+  });
+
+  it("uses turn-specific arbitration before the generic playbook line", () => {
+    expect(selectDeterministicGuidance(
+      [{ text: "Say: “What part of the price concerns you most?”" }],
+      "Say: “Let me ask a general question.”"
+    )).toContain("price concerns");
+    expect(selectDeterministicGuidance(
+      [],
+      "Say: “Let me ask a general question.”"
+    )).toBe("Say: “Let me ask a general question.”");
   });
 });

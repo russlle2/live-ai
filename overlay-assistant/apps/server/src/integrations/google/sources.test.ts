@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { readDriveFile, readGmailMessage, syncGmail } from "./sources.js";
+import {
+  DEFAULT_DRIVE_QUERY,
+  readDriveFile,
+  readGmailMessage,
+  syncGmail
+} from "./sources.js";
 import { GmailSyncStateSchema, type GmailSyncState, type SourceDocument } from "./types.js";
 import type { GoogleReadonlyClient } from "./client.js";
 
@@ -94,6 +99,28 @@ describe("resumable Gmail synchronization", () => {
 });
 
 describe("Google source metadata privacy", () => {
+  it("admits PDF metadata without downloading the PDF body", async () => {
+    expect(DEFAULT_DRIVE_QUERY).toContain("application/pdf");
+    const fakeClient = {
+      json: async () => ({
+        id: "drive-pdf",
+        name: "Interview notes.pdf",
+        mimeType: "application/pdf",
+        modifiedTime: "2026-07-13T00:00:00.000Z",
+        size: "12000"
+      }),
+      text: async () => {
+        throw new Error("PDF body must not be fetched");
+      }
+    } as unknown as GoogleReadonlyClient;
+
+    const document = await readDriveFile(fakeClient, "drive-pdf");
+
+    expect(document.mimeType).toBe("application/pdf");
+    expect(document.reviewFlags).toContain("pdf_metadata_only");
+    expect(document.text).toContain("Interview notes.pdf");
+  });
+
   it("sanitizes a Gmail subject before document storage", async () => {
     const secret = "sk-example-super-secret-token-value";
     const fakeClient = {

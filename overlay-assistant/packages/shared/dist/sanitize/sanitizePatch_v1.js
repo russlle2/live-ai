@@ -42,28 +42,28 @@ export function sanitizePatch_v1(input, opts = {}) {
             const o = {};
             if ("fontSize" in s) {
                 const v = s.fontSize;
-                if (typeof v === "number")
+                if (typeof v === "number" && Number.isFinite(v))
                     o.fontSize = clamp(v, 10, 120);
                 else
                     droppedPaths.push("settings.fontSize");
             }
             if ("speed" in s) {
                 const v = s.speed;
-                if (typeof v === "number")
+                if (typeof v === "number" && Number.isFinite(v))
                     o.speed = clamp(v, 0.25, 5);
                 else
                     droppedPaths.push("settings.speed");
             }
             if ("lineHeight" in s) {
                 const v = s.lineHeight;
-                if (typeof v === "number")
+                if (typeof v === "number" && Number.isFinite(v))
                     o.lineHeight = clamp(v, 0.8, 3);
                 else
                     droppedPaths.push("settings.lineHeight");
             }
             if ("width" in s) {
                 const v = s.width;
-                if (typeof v === "number")
+                if (typeof v === "number" && Number.isFinite(v))
                     o.width = clamp(v, 200, 4000);
                 else
                     droppedPaths.push("settings.width");
@@ -77,7 +77,7 @@ export function sanitizePatch_v1(input, opts = {}) {
             }
             if ("opacity" in s) {
                 const v = s.opacity;
-                if (typeof v === "number")
+                if (typeof v === "number" && Number.isFinite(v))
                     o.opacity = clamp(v, 0, 1);
                 else
                     droppedPaths.push("settings.opacity");

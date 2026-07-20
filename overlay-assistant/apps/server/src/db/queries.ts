@@ -1,4 +1,5 @@
 import { withClient } from "./pool.js";
+import { storedTelemetryTenantId } from "../obs/identifiers.js";
 
 export async function upsertSession(params: { sessionId: string; tenantId: string; repId: string; }): Promise<void> {
   const { sessionId, tenantId, repId } = params;
@@ -61,6 +62,7 @@ export function computeTrustScoreV1(x: Omit<TrustSummary, "trustScore">): number
 
 export async function getTrustSummaryForTenant(tenantId: string): Promise<TrustSummary> {
   return withClient(async (c) => {
+    const telemetryTenantId = storedTelemetryTenantId(tenantId);
     const { rows } = await c.query(
       `SELECT
          (now() AT TIME ZONE 'utc')::date AS day,
@@ -74,7 +76,7 @@ export async function getTrustSummaryForTenant(tenantId: string): Promise<TrustS
          SUM(CASE WHEN event_type='undo' THEN 1 ELSE 0 END)::int AS undo
        FROM obs_events
        WHERE tenant_id=$1 AND (at AT TIME ZONE 'utc')::date = (now() AT TIME ZONE 'utc')::date`,
-      [tenantId]
+      [telemetryTenantId]
     );
 
     const r = rows[0] ?? { day: new Date().toISOString().slice(0, 10) };

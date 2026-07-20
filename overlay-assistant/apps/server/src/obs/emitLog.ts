@@ -1,6 +1,7 @@
-import { createHmac, randomBytes } from "node:crypto";
 import { insertObsEvent } from "../db/queries.js";
-import { CONFIG } from "../config.js";
+import { opaqueLogIdentifier } from "./identifiers.js";
+
+export { opaqueLogIdentifier } from "./identifiers.js";
 
 export type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
@@ -97,8 +98,6 @@ const SECRET_VALUE_PATTERN = /\b(?:sk|sk-proj)-[a-z0-9_-]{12,}\b|\b(?:bearer|bas
 const EMAIL_VALUE_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const PHONE_VALUE_PATTERN = /\b(?:\+?1[ .-]?)?\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4}\b/g;
 const QUERY_SECRET_PATTERN = /([?&](?:token|code|key|secret|signature|sig|auth|credential)=)[^&#\s]+/gi;
-const processRandomLogSalt = randomBytes(32).toString("hex");
-
 function redactStringValue(value: string): string {
   return value
     .replace(QUERY_SECRET_PATTERN, "$1[redacted]")
@@ -111,13 +110,6 @@ function clampString(s: unknown, max = 200): string {
   const str = typeof s === "string" ? s : String(s ?? "");
   const noCtl = redactStringValue(str).replace(/[\u0000-\u001F\u007F]/g, "");
   return noCtl.length > max ? noCtl.slice(0, max) : noCtl;
-}
-
-/** Stable only for a deployment that keeps the same JWT secret; raw IDs never enter logs. */
-export function opaqueLogIdentifier(kind: "tenant" | "rep" | "session", value?: string): string | undefined {
-  if (!value) return undefined;
-  const digest = createHmac("sha256", CONFIG.jwtSecret || processRandomLogSalt).update(value).digest("hex").slice(0, 20);
-  return `${kind}_${digest}`;
 }
 
 /** Exported for privacy regression tests; every nested string takes the same redaction path. */

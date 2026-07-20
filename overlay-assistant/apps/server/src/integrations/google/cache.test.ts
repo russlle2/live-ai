@@ -67,11 +67,7 @@ describe("Google source cache privacy", () => {
     await cache.markDeleted(document.sourceRef);
 
     const deleted = (await cache.read()).sources[document.sourceRef];
-    expect(deleted?.deletedAt).toBe("2026-07-13T12:00:00.000Z");
-    expect(deleted?.title).toBe("");
-    expect(deleted?.text).toBe("");
-    expect(deleted?.extractedFacts).toEqual([]);
-    expect(deleted?.extractedContentHash).toBeUndefined();
+    expect(deleted).toBeUndefined();
     const rawCache = await fs.readFile(path.join(storageDir, "google-source-cache.json"), "utf8");
     expect(rawCache).not.toContain("Cached source body that must be purged.");
     expect(rawCache).not.toContain("Derived source fact that must be purged.");
@@ -148,5 +144,14 @@ describe("Google source cache privacy", () => {
       contentHash: "b".repeat(64)
     })).rejects.toBeInstanceOf(GoogleSourceCapacityError);
     expect(Object.keys((await cache.read()).sources)).toEqual(["drive:first"]);
+
+    await cache.markDeleted("drive:first");
+    await expect(cache.upsert({
+      ...document,
+      sourceRef: "drive:second",
+      externalId: "second",
+      contentHash: "b".repeat(64)
+    })).resolves.toMatchObject({ changed: true });
+    expect(Object.keys((await cache.read()).sources)).toEqual(["drive:second"]);
   });
 });
