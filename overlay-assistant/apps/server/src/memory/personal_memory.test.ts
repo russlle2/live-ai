@@ -7,6 +7,7 @@ import type { MemoryFact } from "./personal_memory.js";
 import {
   appendSessionTurn,
   clearMemoryFile,
+  formatMemoryContext,
   rankMemoryFacts,
   readMemoryFile,
   readSessionTurns,
@@ -139,6 +140,46 @@ describe("personal memory retrieval", () => {
     });
 
     expect(result.map((item) => item.id)).toEqual(["safe"]);
+  });
+
+  it("allows review-gated local context in permissive personal mode without exposing restricted facts", () => {
+    const result = rankMemoryFacts([
+      fact({
+        id: "review-context",
+        category: "constraint",
+        fact: "A scheduling constraint that may matter to this conversation.",
+        keywords: ["schedule", "review:needs_review"],
+        sensitivity: "sensitive",
+        userVerified: false
+      }),
+      fact({
+        id: "restricted",
+        category: "constraint",
+        fact: "A restricted fact matching schedule.",
+        keywords: ["schedule"],
+        sensitivity: "restricted",
+        userVerified: true
+      })
+    ], {
+      query: "schedule constraint",
+      profile: { mode: "general" },
+      policy: "personal_permissive"
+    });
+
+    expect(result.map((item) => item.id)).toEqual(["review-context"]);
+  });
+
+  it("labels review-gated evidence explicitly in model context", () => {
+    const context = formatMemoryContext([
+      fact({
+        id: "review-context",
+        category: "constraint",
+        fact: "A tentative scheduling constraint.",
+        keywords: ["review:needs_review"],
+        userVerified: false
+      })
+    ]);
+    expect(context).toContain("review-required");
   });
 
   it("only retrieves sensitive facts after verification and sensitive review are complete", () => {

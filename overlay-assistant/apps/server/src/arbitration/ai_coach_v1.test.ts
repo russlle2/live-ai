@@ -213,6 +213,16 @@ describe("AI coach prompt", () => {
       coaching: "Say: I built and delivered a wellness website for a client",
       usedMemoryIds: [fact.id]
     }))).toEqual({ ok: true, usedMemoryIds: [fact.id] });
+
+    const reviewGatedFact: MemoryFact = {
+      ...fact,
+      keywords: ["review:needs_review"],
+      userVerified: false
+    };
+    expect(validateCoachOutput(request({ memoryFacts: [reviewGatedFact] }), output({
+      coaching: "Say: I built and delivered a wellness website for a client",
+      usedMemoryIds: [reviewGatedFact.id]
+    }))).toEqual({ ok: false, reason: "review_gated_personal_history" });
   });
 
   it("blocks destructive IT steps, credential requests, and private identifiers", () => {

@@ -900,6 +900,7 @@ const MemorySearchQuery = z.object({
   company: z.string().max(300).optional(),
   goal: z.string().max(1500).optional(),
   preContext: z.string().max(5000).optional(),
+  policy: z.enum(["strict", "personal_permissive"]).optional().default("personal_permissive"),
   limit: z.coerce.number().int().min(1).max(50).optional().default(12)
 });
 const ArchiveSearchQuery = z.object({
@@ -933,8 +934,8 @@ app.get("/api/memory/search", requireAuth, asyncRoute(async (req, res) => {
   if (!parsed.success) {
     return sendErr(res, 400, "validation_error", "Invalid memory search", parsed.error.flatten());
   }
-  const { q, limit, ...profile } = parsed.data;
-  const facts = await retrieveMemoryFacts({ query: q, profile, limit });
+  const { q, limit, policy, ...profile } = parsed.data;
+  const facts = await retrieveMemoryFacts({ query: q, profile, limit, policy });
   return sendOk(res, { facts, total: facts.length });
 }));
 
@@ -1655,10 +1656,14 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
         ctx.profile.goal,
         ...ctx.conversationHistory.slice(-5).map((turn) => turn.text)
       ].filter((value): value is string => Boolean(value)).join(" ");
+      const memoryPolicy = getCoachingProviderConfig()?.kind === "local"
+        ? "personal_permissive" as const
+        : "strict" as const;
       const [memoryFacts, coaching] = await Promise.all([
         retrieveMemoryFacts({
           query: coachingQuery,
-          profile: ctx.profile
+          profile: ctx.profile,
+          policy: memoryPolicy
         }),
         coachingCorpusState
       ]);

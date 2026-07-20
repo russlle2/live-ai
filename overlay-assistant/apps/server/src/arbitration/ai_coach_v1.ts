@@ -355,6 +355,17 @@ export function validateCoachOutput(req: CoachRequest, output: CoachOutput): Coa
   const personalClaimTexts = [output.coaching, output.backup]
     .filter((value) => PERSONAL_HISTORY_PATTERN.test(value));
   const personalHistoryClaimed = personalClaimTexts.length > 0;
+  if (
+    personalHistoryClaimed &&
+    citedFacts.some((fact) =>
+      (fact.sensitivity === "sensitive" && !fact.userVerified) ||
+      fact.keywords.some((keyword) =>
+        /^review:(?:needs_review|low_confidence|sensitive_review|conflicts_with:)/i.test(keyword)
+      )
+    )
+  ) {
+    return { ok: false, reason: "review_gated_personal_history" };
+  }
   const groundedText = [
     ...citedFacts.map((fact) => fact.fact),
     req.profile.preContext ?? "",

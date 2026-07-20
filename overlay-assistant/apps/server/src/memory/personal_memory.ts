@@ -330,6 +330,7 @@ export async function retrieveMemoryFacts(params: {
   query: string;
   profile: SessionProfileV1;
   limit?: number;
+  policy?: "strict" | "personal_permissive";
 }): Promise<MemoryFact[]> {
   const memory = await readMemoryFile();
   return rankMemoryFacts(memory.facts, params);
@@ -341,7 +342,12 @@ export async function retrieveMemoryFacts(params: {
  */
 export function rankMemoryFacts(
   facts: MemoryFact[],
-  params: { query: string; profile: SessionProfileV1; limit?: number }
+  params: {
+    query: string;
+    profile: SessionProfileV1;
+    limit?: number;
+    policy?: "strict" | "personal_permissive";
+  }
 ): MemoryFact[] {
   const queryTerms = terms([
     params.query,
@@ -352,15 +358,16 @@ export function rankMemoryFacts(
   ].filter(Boolean).join(" "));
   const boosted = MODE_CATEGORY_BOOST[params.profile.mode] ?? MODE_CATEGORY_BOOST.general;
   const now = Date.now();
+  const policy = params.policy ?? "strict";
 
   return facts
     .filter((fact) => {
       if (fact.sensitivity === "restricted") return false;
-      const requiresReview = fact.keywords.some((keyword) =>
-        /^review:(?:needs_review|low_confidence|sensitive_review|conflicts_with:)/i.test(keyword)
-      );
-      if (fact.sensitivity === "sensitive" && (!fact.userVerified || requiresReview)) return false;
-      if (!fact.userVerified && requiresReview) return false;
+      const requiresReview = memoryFactRequiresReview(fact);
+      if (policy === "strict") {
+        if (fact.sensitivity === "sensitive" && (!fact.userVerified || requiresReview)) return false;
+        if (!fact.userVerified && requiresReview) return false;
+      }
       const validFrom = fact.validFrom ? Date.parse(fact.validFrom) : Number.NaN;
       const validTo = fact.validTo ? Date.parse(fact.validTo) : Number.NaN;
       if (Number.isFinite(validFrom) && validFrom > now) return false;
@@ -376,7 +383,9 @@ export function rankMemoryFacts(
         (boosted.has(fact.category) ? 3 : 0) +
         (fact.userVerified ? 3 : 0) +
         fact.confidence * 2 +
-        (fact.category === "identity" ? 0.5 : 0);
+        (fact.category === "identity" ? 0.5 : 0) -
+        (memoryFactRequiresReview(fact) ? 4 : 0) -
+        (fact.sensitivity === "sensitive" && !fact.userVerified ? 2 : 0);
       return { fact, score };
     })
     .sort((a, b) => b.score - a.score || b.fact.confidence - a.fact.confidence)
@@ -391,9 +400,16 @@ export function formatMemoryContext(facts: MemoryFact[]): string {
       const sourceRef = fact.source.ref?.replace(/\s+/g, " ").slice(0, 160);
       const source = `${fact.source.type}${sourceRef ? `:${sourceRef}` : ""}`;
       const compactFact = fact.fact.replace(/\s+/g, " ").trim().slice(0, 1200);
-      return `- [${fact.id}] ${compactFact} (source ${source}; confidence ${fact.confidence.toFixed(2)}${fact.userVerified ? ", user-verified" : ", not user-verified"})`;
+      const review = memoryFactRequiresReview(fact) ? ", review-required" : "";
+      return `- [${fact.id}] ${compactFact} (source ${source}; confidence ${fact.confidence.toFixed(2)}${fact.userVerified ? ", user-verified" : ", not user-verified"}${review})`;
     })
     .join("\n");
+}
+
+function memoryFactRequiresReview(fact: MemoryFact): boolean {
+  return fact.keywords.some((keyword) =>
+    /^review:(?:needs_review|low_confidence|sensitive_review|conflicts_with:)/i.test(keyword)
+  );
 }
 
 export async function getMemoryStats(): Promise<Record<string, unknown>> {
