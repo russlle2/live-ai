@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { MemoryFactInput } from "./personal_memory.js";
 import {
   appendDeliveryStyleObservation,
+  boundDeliveryStyleObservations,
   buildDeliveryStyleLearningInput,
   compareSuggestedToActual,
   createDeliveryStyleObservation,
@@ -92,6 +93,36 @@ describe("suggestion-to-delivery comparison", () => {
     expect(serialized).not.toContain("hunter2");
     expect(serialized).not.toContain("owner@example.com");
     expect(result.differences.every((difference) => difference.length <= 180)).toBe(true);
+  });
+});
+
+describe("guidance feedback attribution", () => {
+  it("retains accepted/unmarked observations and excludes explicit dismissals", () => {
+    const accepted = createDeliveryStyleObservation({
+      sessionId: "accepted-session",
+      suggested: "Say: I understand. Let me verify that.",
+      actual: "I understand. Let me check that.",
+      feedbackStatus: "accepted"
+    });
+    const ignored = createDeliveryStyleObservation({
+      sessionId: "ignored-session",
+      suggested: "Say: I understand. Let me verify that.",
+      actual: "I want to discuss something else.",
+      feedbackStatus: "ignored"
+    });
+    const unmarked = createDeliveryStyleObservation({
+      sessionId: "unmarked-session",
+      suggested: "Say: I understand. Let me verify that.",
+      actual: "I hear you. Let me verify it."
+    });
+
+    expect(accepted.feedbackStatus).toBe("accepted");
+    expect(unmarked.feedbackStatus).toBe("unmarked");
+    expect(boundDeliveryStyleObservations([accepted, ignored, unmarked])
+      .map((item) => item.sessionRef)).toEqual([
+      "session:accepted-session",
+      "session:unmarked-session"
+    ]);
   });
 });
 

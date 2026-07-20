@@ -85,7 +85,7 @@ async function waitForServer() {
 async function checkWebSocket(token) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
   const messages = [];
-  await new Promise((resolve, reject) => {
+  const guidanceId = await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("websocket smoke timed out")), 5_000);
     ws.on("open", () => {
       ws.send(JSON.stringify({
@@ -107,21 +107,39 @@ async function checkWebSocket(token) {
       const message = JSON.parse(String(data));
       messages.push(message);
       const ready = messages.some((item) => item.type === "ready");
-      const greeting = messages.some((item) =>
+      const greeting = messages.find((item) =>
         item.type === "overlay_message" &&
         item.coaching?.playbookStageId === "greeting" &&
         item.coaching?.phase === "final" &&
+        typeof item.coaching?.guidanceId === "string" &&
         item.message?.type === "patch" &&
         typeof item.message?.patch?.text === "string" &&
         item.message.patch.text.startsWith("Say:")
       );
       if (ready && greeting) {
         clearTimeout(timeout);
-        resolve();
+        resolve(greeting.coaching.guidanceId);
       }
     });
     ws.on("error", reject);
   });
+  assert.match(String(guidanceId), /^guidance-/);
+  const feedback = await fetch(`${baseUrl}/api/ui-event`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      tenantId: "personal",
+      repId: "owner",
+      sessionId: "runtime-smoke-session",
+      eventType: "suggestion_applied",
+      data: { guidanceId }
+    }),
+    signal: AbortSignal.timeout(2_000)
+  });
+  assert.equal(feedback.ok, true, `guidance feedback returned ${feedback.status}`);
   ws.send(JSON.stringify({ type: "stop", session_id: "runtime-smoke-session" }));
   ws.close();
 }

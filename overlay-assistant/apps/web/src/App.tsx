@@ -151,6 +151,7 @@ export function App() {
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [overlayState, setOverlayState] = useState<OverlayStateV1>(DEFAULT_STATE);
   const [suggestionStage, setSuggestionStage] = useState<SuggestionStage>("idle");
+  const [activeGuidanceId, setActiveGuidanceId] = useState<string | null>(null);
   const [typedText, setTypedText] = useState("");
   const [typedSpeaker, setTypedSpeaker] = useState<ConversationSpeakerV1>("lead");
   const [interims, setInterims] = useState<Partial<Record<AudioSource, string>>>({});
@@ -362,7 +363,7 @@ export function App() {
 
   const applyOverlayMessage = useCallback((
     message: OverlayMessageV1,
-    coaching?: Pick<CoachingDeliveryV1, "phase" | "aiGenerated" | "playbookStageId">
+    coaching?: Pick<CoachingDeliveryV1, "guidanceId" | "phase" | "aiGenerated" | "playbookStageId">
   ) => {
     if (message.type === "settings") {
       const controls = (message.settings as { controls?: OverlayStateV1["settings"]["controls"] }).controls;
@@ -377,6 +378,7 @@ export function App() {
     }
     if (typeof result.patch.text === "string") {
       setOverlayState((current) => ({ ...current, text: result.patch.text } as OverlayStateV1));
+      if (coaching?.guidanceId) setActiveGuidanceId(coaching.guidanceId);
       setSuggestionStage(
         coaching?.playbookStageId === "greeting" && coaching.phase === "final"
           ? "opening"
@@ -472,6 +474,7 @@ export function App() {
 
     if (speaker === "lead") {
       setOverlayState((current) => ({ ...current, text: chooseCushion(profile.mode, text) } as OverlayStateV1));
+      setActiveGuidanceId(null);
       setSuggestionStage("cushion");
     }
 
@@ -550,6 +553,7 @@ export function App() {
       setTranscript([]);
       setDeliveryObservations([]);
       setAutomation(null);
+      setActiveGuidanceId(null);
       setMemoryReviewOpen(false);
       setAuthToken(null);
       tokenRef.current = null;
@@ -598,6 +602,7 @@ export function App() {
     setTranscript([]);
     setDeliveryObservations([]);
     setOverlayState(DEFAULT_STATE);
+    setActiveGuidanceId(null);
     setSuggestionStage("idle");
     setActivePlaybookStageId("greeting");
     setSessionStart(null);
@@ -636,32 +641,45 @@ export function App() {
     setInstallPrompt(null);
   }, [installPrompt]);
 
-  const onShown = async (itemId: string) => {
-    await postUiEvent({ tenantId: PERSONAL_TENANT_ID, repId: PERSONAL_REP_ID, sessionId, eventType: "suggestion_shown", data: { itemId } }, httpBase, tokenRef.current);
+  const onShown = async (guidanceId: string) => {
+    if (!guidanceId) return;
+    await postUiEvent({ tenantId: PERSONAL_TENANT_ID, repId: PERSONAL_REP_ID, sessionId, eventType: "suggestion_shown", data: { guidanceId } }, httpBase, tokenRef.current);
   };
-  const onApply = async (itemId: string) => {
-    await postUiEvent({ tenantId: PERSONAL_TENANT_ID, repId: PERSONAL_REP_ID, sessionId, eventType: "suggestion_applied", data: { itemId } }, httpBase, tokenRef.current);
+  const onApply = async (guidanceId: string) => {
+    if (!guidanceId) return;
+    await postUiEvent({ tenantId: PERSONAL_TENANT_ID, repId: PERSONAL_REP_ID, sessionId, eventType: "suggestion_applied", data: { guidanceId } }, httpBase, tokenRef.current);
     addToast("success", "Marked as used", 1800);
   };
-  const onDismiss = async (itemId: string) => {
+  const onDismiss = async (guidanceId: string) => {
+    if (guidanceId) {
+      await postUiEvent({ tenantId: PERSONAL_TENANT_ID, repId: PERSONAL_REP_ID, sessionId, eventType: "suggestion_dismissed", data: { guidanceId } }, httpBase, tokenRef.current);
+    }
     setOverlayState((current) => ({
       ...current,
       text: "",
-      guidance: { items: current.guidance.items.filter((item) => item.id !== itemId) }
+      guidance: { items: [] }
     } as OverlayStateV1));
+    setActiveGuidanceId(null);
     setSuggestionStage("idle");
   };
   const onMuteToggle = async () => {
+    const nextMuted = !overlayState.settings.controls.guidanceMuted;
     setOverlayState((current) => ({
       ...current,
       settings: {
         ...current.settings,
         controls: {
           ...current.settings.controls,
-          guidanceMuted: !current.settings.controls.guidanceMuted
+          guidanceMuted: nextMuted
         }
       }
     }));
+    await postUiEvent({
+      tenantId: PERSONAL_TENANT_ID,
+      repId: PERSONAL_REP_ID,
+      sessionId,
+      eventType: nextMuted ? "mute_on" : "mute_off"
+    }, httpBase, tokenRef.current);
   };
 
   if (showOnboarding) {
@@ -916,6 +934,7 @@ export function App() {
           <OverlayPreview
             state={overlayState}
             stage={suggestionStage}
+            guidanceId={activeGuidanceId ?? undefined}
             onShown={onShown}
             onApply={onApply}
             onDismiss={onDismiss}

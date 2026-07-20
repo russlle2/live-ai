@@ -49,6 +49,7 @@ export const DeliveryStyleObservationSchema = z.object({
   sessionRef: z.string().min(1).max(180),
   observedAt: z.string().min(1).max(100),
   suggestionKind: z.enum(["cushion", "provisional", "final"]).default("final"),
+  feedbackStatus: z.enum(["unmarked", "accepted", "ignored"]).default("unmarked"),
   suggestedExcerpt: z.string().max(MAX_EXCERPT_CHARS),
   actualExcerpt: z.string().max(MAX_EXCERPT_CHARS),
   redactionsApplied: z.boolean(),
@@ -254,6 +255,7 @@ export function createDeliveryStyleObservation(params: {
   actual: string;
   observedAt?: string;
   suggestionKind?: "cushion" | "provisional" | "final";
+  feedbackStatus?: "unmarked" | "accepted" | "ignored";
 }): DeliveryStyleObservation {
   const observedAt = compact(params.observedAt ?? new Date().toISOString(), 100);
   const safeSuggested = redactDeliveryText(stripSayPrefix(params.suggested));
@@ -271,6 +273,7 @@ export function createDeliveryStyleObservation(params: {
     sessionRef,
     observedAt,
     suggestionKind: params.suggestionKind ?? "final",
+    feedbackStatus: params.feedbackStatus ?? "unmarked",
     suggestedExcerpt: safeSuggested.text,
     actualExcerpt: safeActual.text,
     redactionsApplied: safeSuggested.redacted || safeActual.redacted,
@@ -390,7 +393,10 @@ export function boundDeliveryStyleObservations(
 ): DeliveryStyleObservation[] {
   return observations
     .map((observation) => DeliveryStyleObservationSchema.parse(observation))
-    .filter((observation) => observation.suggestionKind === "final")
+    .filter((observation) =>
+      observation.suggestionKind === "final" &&
+      observation.feedbackStatus !== "ignored"
+    )
     .slice(-MAX_DELIVERY_STYLE_OBSERVATIONS);
 }
 

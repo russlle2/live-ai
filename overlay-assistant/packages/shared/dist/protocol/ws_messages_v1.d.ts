@@ -34,12 +34,15 @@ export type TranscriptFinalV1 = {
     attributionReason?: string;
 };
 export type CoachingDeliveryV1 = {
+    /** Stable across cushion, provisional, and final phases for one response cycle. */
+    guidanceId: string;
     phase: "cushion" | "provisional" | "final";
     aiGenerated: boolean;
     category?: string;
     confidence?: number;
     latencyMs?: number;
     memoryFactIds?: string[];
+    feedbackStatus?: "unmarked" | "accepted" | "ignored";
     /** Deterministic greeting-to-goodbye stage, when one applies. */
     playbookStageId?: string;
 };
@@ -52,10 +55,12 @@ export type DeliveryClassificationV1 = "exact" | "paraphrased" | "changed";
 export type DeliveryObservationMessageV1 = {
     type: "delivery_observation";
     session_id: string;
+    guidanceId: string;
     seq: number;
     at: string;
     suggestion: string;
     actual: string;
+    feedbackStatus: "unmarked" | "accepted";
     comparison: {
         classification: DeliveryClassificationV1;
         similarity: number;

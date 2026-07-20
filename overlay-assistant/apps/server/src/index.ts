@@ -1,4 +1,5 @@
 import http from "http";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -88,6 +89,7 @@ import {
   scheduleDeliveryStyleLearning,
   type DeliveryStyleObservation
 } from "./memory/delivery_style_learning.js";
+import { GuidanceFeedbackStoreV2 } from "./session/guidance_feedback_v2.js";
 import { createRealtimeTranscriptionClientSecret } from "./openai/realtime_token.js";
 import { getOpenAIClient, openAISafetyIdentifier } from "./openai/client.js";
 import {
@@ -204,6 +206,7 @@ function coachingCorpusStats(examples: CoachingExample[]) {
 }
 
 type PendingDeliverySuggestion = {
+  guidanceId: string;
   text: string;
   leadSeq: number;
   at: string;
@@ -436,16 +439,23 @@ function recordDeliveryStyleObservation(
   const suggestionAgeMs = Date.now() - Date.parse(suggestion.at);
   if (!Number.isFinite(suggestionAgeMs) || suggestionAgeMs < 0 || suggestionAgeMs > 10 * 60_000) {
     ctx.pendingFinalSuggestion = undefined;
+    guidanceFeedbackStore.clearSession(ctx.sessionId);
     return;
   }
+  const feedback = guidanceFeedbackStore.takeForOwnerTurn(
+    ctx.sessionId,
+    suggestion.guidanceId
+  );
   ctx.pendingFinalSuggestion = undefined;
+  if (feedback?.status === "ignored") return;
 
   const observation = createDeliveryStyleObservation({
     sessionId: ctx.sessionId,
     suggested: suggestion.text,
     actual,
     observedAt: at,
-    suggestionKind: "final"
+    suggestionKind: "final",
+    feedbackStatus: feedback?.status === "accepted" ? "accepted" : "unmarked"
   });
   ctx.deliveryStyleObservations.push(observation);
 
@@ -467,10 +477,12 @@ function recordDeliveryStyleObservation(
   broadcast(ctx.sessionId, {
     type: "delivery_observation",
     session_id: ctx.sessionId,
+    guidanceId: suggestion.guidanceId,
     seq: turnSeq,
     at,
     suggestion: observation.suggestedExcerpt,
     actual: observation.actualExcerpt,
+    feedbackStatus: observation.feedbackStatus === "accepted" ? "accepted" : "unmarked",
     comparison: {
       classification: observation.comparison.classification,
       similarity: observation.comparison.similarity,
@@ -483,6 +495,11 @@ function recordDeliveryStyleObservation(
 }
 
 const app = express();
+const guidanceFeedbackStore = new GuidanceFeedbackStoreV2();
+const sessions = new Map<string, SessionCtx>();
+const socketsBySession = new Map<string, Set<any>>();
+let totalWsConnections = 0;
+const wsConnectionsByIp = new Map<string, number>();
 const speakerService = createSpeakerServiceClient({
   // Local development needs no repeated setup; Docker overrides this with the
   // private service hostname on the Compose network.
@@ -734,6 +751,9 @@ const UiEventInput = z.object({
   ]),
   data: z.record(z.any()).optional()
 }).strict();
+const UiGuidanceEventData = z.object({
+  guidanceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,239}$/)
+}).strict();
 
 app.post("/api/ui-event", requireAuth, telemetryRateLimit, asyncRoute(async (req, res) => {
   const parsed = UiEventInput.safeParse(req.body);
@@ -741,11 +761,32 @@ app.post("/api/ui-event", requireAuth, telemetryRateLimit, asyncRoute(async (req
 
   const e = parsed.data;
   if (!assertTenantAccess(req, e.tenantId)) return sendErr(res, 403, "forbidden", "Tenant mismatch");
+  if (req.auth?.repId !== e.repId) return sendErr(res, 403, "forbidden", "Owner mismatch");
+  const session = sessions.get(e.sessionId);
+  if (!session || session.tenantId !== e.tenantId || session.repId !== e.repId) {
+    return sendErr(res, 404, "unknown_session");
+  }
 
   // Hard guard: block obvious transcript leakage fields
   const dataStr = JSON.stringify(e.data ?? {});
   if (/transcript|utterance|raw_text|full_text/i.test(dataStr)) {
     return sendErr(res, 400, "ui_event_contains_disallowed_fields");
+  }
+  if (
+    e.eventType === "suggestion_shown" ||
+    e.eventType === "suggestion_applied" ||
+    e.eventType === "suggestion_dismissed"
+  ) {
+    const guidance = UiGuidanceEventData.safeParse(e.data);
+    if (!guidance.success) return sendErr(res, 400, "guidance_id_required");
+    if (e.eventType === "suggestion_applied" || e.eventType === "suggestion_dismissed") {
+      const marked = guidanceFeedbackStore.mark({
+        sessionId: e.sessionId,
+        guidanceId: guidance.data.guidanceId,
+        status: e.eventType === "suggestion_applied" ? "accepted" : "ignored"
+      });
+      if (!marked) return sendErr(res, 409, "stale_guidance_feedback");
+    }
   }
 
   await emitLog({
@@ -778,11 +819,6 @@ const wss = new WebSocketServer({
     else done(false, 403, "origin_not_allowed");
   }
 });
-
-const sessions = new Map<string, SessionCtx>();
-const socketsBySession = new Map<string, Set<any>>();
-let totalWsConnections = 0;
-const wsConnectionsByIp = new Map<string, number>();
 
 function closeSocketsForPurge(sockets: Set<any>, reason: string): void {
   for (const socket of sockets) {
@@ -1112,6 +1148,7 @@ app.delete("/api/private-data", requireAuth, asyncRoute(async (req, res) => {
   const activeSockets = new Set([...socketsBySession.values()].flatMap((items) => [...items]));
   sessions.clear();
   socketsBySession.clear();
+  result.pendingGuidanceFeedback = guidanceFeedbackStore.clearAll();
   closeSocketsForPurge(activeSockets, "owner_private_data_purge");
 
   try {
@@ -1235,7 +1272,11 @@ function sendCoachingPatch(
   ctx: SessionCtx,
   text: string,
   at: string,
-  coaching: NonNullable<Extract<WsServerMessageV1, { type: "overlay_message" }>["coaching"]>
+  guidanceId: string,
+  coaching: Omit<
+    NonNullable<Extract<WsServerMessageV1, { type: "overlay_message" }>["coaching"]>,
+    "guidanceId" | "feedbackStatus"
+  >
 ): boolean {
   const sanitized = sanitizePatch_v1({ text });
   if (!sanitized.ok) {
@@ -1281,19 +1322,32 @@ function sendCoachingPatch(
     }
   });
 
+  const deliveryCoaching: NonNullable<
+    Extract<WsServerMessageV1, { type: "overlay_message" }>["coaching"]
+  > = {
+    ...coaching,
+    guidanceId,
+    feedbackStatus: "unmarked"
+  };
   const delivery: Extract<WsServerMessageV1, { type: "overlay_message" }> = {
     type: "overlay_message",
     session_id: ctx.sessionId,
     at,
     message: { type: "patch", patch: sanitized.patch },
-    coaching
+    coaching: deliveryCoaching
   };
   ctx.lastCoachingMessage = delivery;
+  guidanceFeedbackStore.register({
+    sessionId: ctx.sessionId,
+    guidanceId,
+    basedOnTurnSeq: ctx.latestLeadSeq
+  });
   if (coaching.playbookStageId) {
     ctx.activePlaybookStageId = coaching.playbookStageId as ConversationPlaybookStageIdV1;
   }
   if (coaching.phase === "final" && typeof sanitized.patch.text === "string") {
     ctx.pendingFinalSuggestion = {
+      guidanceId,
       text: sanitized.patch.text,
       leadSeq: ctx.latestLeadSeq,
       at
@@ -1423,10 +1477,11 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
     completedStageIds: ctx.completedPlaybookStageIds
   });
   const playbookFallback = exactPlaybookLine(playbookStage.say);
+  const guidanceId = `guidance-${randomUUID()}`;
 
   // Give the user a deterministic line immediately while contextual coaching is
   // generated. This bypasses coalescing by design.
-  sendCoachingPatch(ctx, getDeterministicCushion(ctx.profile.mode), now, {
+  sendCoachingPatch(ctx, getDeterministicCushion(ctx.profile.mode), now, guidanceId, {
     phase: "cushion",
     aiGenerated: false,
     category: "cushion",
@@ -1450,6 +1505,7 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
         ctx,
         playbookFallback,
         new Date().toISOString(),
+        guidanceId,
         {
           phase: "provisional",
           aiGenerated: false,
@@ -1534,6 +1590,7 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
     ctx,
     aiResult?.coaching ?? playbookFallback,
     finalAt,
+    guidanceId,
     {
       phase: "final",
       aiGenerated: Boolean(aiResult),
@@ -1748,14 +1805,20 @@ wss.on("connection", (ws, request) => {
 
       if (!existing) {
         const greeting = getInitialPlaybookStageV1(ctx.profile);
-        sendCoachingPatch(ctx, exactPlaybookLine(greeting.say), new Date().toISOString(), {
-          phase: "final",
-          aiGenerated: false,
-          category: "opening",
-          latencyMs: 0,
-          memoryFactIds: [],
-          playbookStageId: greeting.id
-        });
+        sendCoachingPatch(
+          ctx,
+          exactPlaybookLine(greeting.say),
+          new Date().toISOString(),
+          `guidance-${randomUUID()}`,
+          {
+            phase: "final",
+            aiGenerated: false,
+            category: "opening",
+            latencyMs: 0,
+            memoryFactIds: [],
+            playbookStageId: greeting.id
+          }
+        );
         // Load only the bounded, already-redacted tail. Two historical pairs
         // plus the first new pair are enough to trigger cross-session learning.
         void trackPrivateDataTask(ctx.dataEpoch, () => readRecentDeliveryStyleObservations()).then((recent) => {
@@ -1855,6 +1918,7 @@ wss.on("connection", (ws, request) => {
       sessions.delete(sessionId);
       socketsBySession.get(sessionId)?.delete(ws);
       clearSessionRateLimit(sessionId);
+      guidanceFeedbackStore.clearSession(sessionId);
       await trackPrivateDataTask(
         ctx?.dataEpoch ?? privateDataEpoch,
         () => endSession(sessionId)
@@ -2015,6 +2079,7 @@ const sessionCleanupTimer = setInterval(() => {
         socketsBySession.delete(sid);
       }
       clearSessionRateLimit(sid);
+      guidanceFeedbackStore.clearSession(sid);
       void trackPrivateDataTask(ctx.dataEpoch, () => endSession(sid)).catch(() => {});
       emitLog({
         tenantId: ctx.tenantId, repId: ctx.repId, session_id: ctx.sessionId,
