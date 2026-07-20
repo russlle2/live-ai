@@ -19,12 +19,63 @@ export async function endSession(sessionId: string): Promise<void> {
   });
 }
 
-export async function insertObsEvent(e: { tenantId: string; repId: string; sessionId?: string; service: string; eventType: string; data: unknown; at?: string; }): Promise<void> {
-  await withClient(async (c) => {
+export type ObsEventInput = {
+  tenantId: string;
+  repId: string;
+  sessionId?: string;
+  service: string;
+  eventType: string;
+  data: unknown;
+  at?: string;
+};
+export type ObsClientRunner = (
+  operation: (client: {
+    query: (text: string, values?: unknown[]) => Promise<unknown>;
+  }) => Promise<void>
+) => Promise<void>;
+
+export async function insertObsEvent(e: ObsEventInput): Promise<void> {
+  await insertObsEvents([e]);
+}
+
+export async function insertObsEvents(
+  events: ObsEventInput[],
+  clientRunner: ObsClientRunner = async (operation) =>
+    withClient(async (client) => operation({
+      query: (text, values) => client.query(text, values)
+    }))
+): Promise<void> {
+  if (events.length === 0) return;
+  const payload = events.map((event) => ({
+    at: event.at ?? null,
+    tenant_id: event.tenantId,
+    rep_id: event.repId,
+    session_id: event.sessionId ?? null,
+    service: event.service,
+    event_type: event.eventType,
+    data: event.data ?? {}
+  }));
+  await clientRunner(async (c) => {
     await c.query(
       `INSERT INTO obs_events(at, tenant_id, rep_id, session_id, service, event_type, data)
-       VALUES (COALESCE($1::timestamptz, now()), $2, $3, $4, $5, $6, $7::jsonb)`,
-      [e.at ?? null, e.tenantId, e.repId, e.sessionId ?? null, e.service, e.eventType, JSON.stringify(e.data ?? {})]
+       SELECT
+         COALESCE(event.at::timestamptz, now()),
+         event.tenant_id,
+         event.rep_id,
+         event.session_id,
+         event.service,
+         event.event_type,
+         event.data
+       FROM jsonb_to_recordset($1::jsonb) AS event(
+         at text,
+         tenant_id text,
+         rep_id text,
+         session_id text,
+         service text,
+         event_type text,
+         data jsonb
+       )`,
+      [JSON.stringify(payload)]
     );
   });
 }

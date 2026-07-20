@@ -1,4 +1,4 @@
-import { insertObsEvent } from "../db/queries.js";
+import { insertObsEvent, insertObsEvents } from "../db/queries.js";
 import { opaqueLogIdentifier } from "./identifiers.js";
 
 export { opaqueLogIdentifier } from "./identifiers.js";
@@ -88,9 +88,7 @@ async function insertObsEventBatch(events: PendingEvent[]): Promise<void> {
     await insertObsEvent(events[0]);
     return;
   }
-  // For multiple events, still use insertObsEvent individually
-  // (a true VALUES-list batch can be added later for even more throughput)
-  await Promise.allSettled(events.map((e) => insertObsEvent(e)));
+  await insertObsEvents(events);
 }
 
 const SENSITIVE_KEY_PATTERN = /(token|secret|password|authorization|cookie|api[_-]?key|auth[_-]?tag|iv|encrypted)/i;
