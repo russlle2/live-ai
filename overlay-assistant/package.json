@@ -7,14 +7,14 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "pnpm -C packages/shared build && concurrently -n shared,server,web -c auto \"pnpm -C packages/shared dev\" \"pnpm -C apps/server dev\" \"pnpm -C apps/web dev\"",
+    "dev": "pnpm -C packages/shared build && pnpm -C packages/runtime build && concurrently -n shared,runtime,server,web -c auto \"pnpm -C packages/shared dev\" \"pnpm -C packages/runtime dev\" \"pnpm -C apps/server dev\" \"pnpm -C apps/web dev\"",
     "dev:server": "pnpm -C apps/server dev",
     "dev:web": "pnpm -C apps/web dev",
     "build": "pnpm -r build",
-    "lint": "pnpm -C packages/shared build && pnpm -r lint",
-    "test": "pnpm -C packages/shared build && pnpm -r test",
-    "typecheck": "pnpm -C packages/shared build && pnpm -r typecheck",
-    "check": "pnpm -C packages/shared build && pnpm -r lint && pnpm -r typecheck && pnpm -r test",
+    "lint": "pnpm -C packages/shared build && pnpm -C packages/runtime build && pnpm -r lint",
+    "test": "pnpm -C packages/shared build && pnpm -C packages/runtime build && pnpm -r test",
+    "typecheck": "pnpm -C packages/shared build && pnpm -C packages/runtime build && pnpm -r typecheck",
+    "check": "pnpm -C packages/shared build && pnpm -C packages/runtime build && pnpm -r lint && pnpm -r typecheck && pnpm -r test",
     "format": "prettier -w ."
   },
   "devDependencies": {

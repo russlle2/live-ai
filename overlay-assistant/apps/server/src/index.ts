@@ -90,6 +90,7 @@ import {
   type DeliveryStyleObservation
 } from "./memory/delivery_style_learning.js";
 import { GuidanceFeedbackStoreV2 } from "./session/guidance_feedback_v2.js";
+import { SessionGuidanceV2 } from "./session/session_guidance_v2.js";
 import { createRealtimeTranscriptionClientSecret } from "./openai/realtime_token.js";
 import { getOpenAIClient, openAISafetyIdentifier } from "./openai/client.js";
 import {
@@ -233,6 +234,7 @@ type SessionCtx = {
   completedPlaybookStageIds: ConversationPlaybookStageIdV1[];
   activePlaybookStageId?: ConversationPlaybookStageIdV1;
   lastCoachingMessage?: Extract<WsServerMessageV1, { type: "overlay_message" }>;
+  guidance: SessionGuidanceV2;
   pendingFinalSuggestion?: PendingDeliverySuggestion;
   deliveryStyleObservations: DeliveryStyleObservation[];
   deliveryLearningInFlight: boolean;
@@ -786,7 +788,17 @@ app.post("/api/ui-event", requireAuth, telemetryRateLimit, asyncRoute(async (req
         status: e.eventType === "suggestion_applied" ? "accepted" : "ignored"
       });
       if (!marked) return sendErr(res, 409, "stale_guidance_feedback");
+      if (
+        e.eventType === "suggestion_dismissed" &&
+        session.guidance.currentGuidanceId === guidance.data.guidanceId
+      ) {
+        session.guidance.cancel("owner_dismissed");
+      }
     }
+  }
+  if (e.eventType === "mute_on" || e.eventType === "mute_off") {
+    session.controls.guidanceMuted = e.eventType === "mute_on";
+    if (session.controls.guidanceMuted) session.guidance.cancel("owner_muted_guidance");
   }
 
   await emitLog({
@@ -1146,6 +1158,7 @@ app.delete("/api/private-data", requireAuth, asyncRoute(async (req, res) => {
   const result: Record<string, unknown> = {};
   const warnings: string[] = [];
   const activeSockets = new Set([...socketsBySession.values()].flatMap((items) => [...items]));
+  for (const session of sessions.values()) session.guidance.cancel("private_data_purge");
   sessions.clear();
   socketsBySession.clear();
   result.pendingGuidanceFeedback = guidanceFeedbackStore.clearAll();
@@ -1362,6 +1375,10 @@ function exactPlaybookLine(say: string): string {
   return `Say: “${trimmed.replace(/^[“\"]|[”\"]$/g, "")}”`;
 }
 
+function guidanceIsDisabled(ctx: SessionCtx): boolean {
+  return ctx.controls.guidanceMuted || ctx.controls.guidanceMode === "off";
+}
+
 /**
  * onTranscriptFinal — the HOT PATH.
  *
@@ -1383,6 +1400,7 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
   ctx.speaker = speaker;
   const turnSeq = ctx.seq;
   const now = new Date().toISOString();
+  ctx.guidance.cancel("new_transcript_turn");
 
   // Keep a bounded prompt context and a private, local session record.
   ctx.conversationHistory.push({ speaker, text });
@@ -1470,14 +1488,18 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
   // correction, or repeated calibrated direction in two-person acoustic mode.
   if (!shouldCoachSpeaker(speaker)) return;
   ctx.latestLeadSeq = turnSeq;
-  if (ctx.controls.guidanceMuted || ctx.controls.guidanceMode === "off") return;
+  if (guidanceIsDisabled(ctx)) return;
 
   const playbookStage = selectNextPlaybookStageV1(ctx.profile, {
     transcript: text,
     completedStageIds: ctx.completedPlaybookStageIds
   });
   const playbookFallback = exactPlaybookLine(playbookStage.say);
-  const guidanceId = `guidance-${randomUUID()}`;
+  const guidanceLease = ctx.guidance.beginTurn(
+    `turn-${turnSeq}`,
+    CONFIG.coachingFinalDeadlineMs
+  );
+  const guidanceId = guidanceLease.guidanceId;
 
   // Give the user a deterministic line immediately while contextual coaching is
   // generated. This bypasses coalescing by design.
@@ -1491,17 +1513,17 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
 
   let aiResult: Awaited<ReturnType<typeof getAiCoaching>> = null;
   const aiEnabled = isAiCoachEnabled();
-  let provisionalSent = false;
   let provisionalTimer: ReturnType<typeof setTimeout> | undefined;
 
   if (aiEnabled) {
     provisionalTimer = setTimeout(() => {
       if (
         ctx.latestLeadSeq !== turnSeq ||
+        !guidanceLease.canPublish() ||
         ctx.controls.guidanceMuted ||
         ctx.controls.guidanceMode === "off"
       ) return;
-      provisionalSent = sendCoachingPatch(
+      sendCoachingPatch(
         ctx,
         playbookFallback,
         new Date().toISOString(),
@@ -1553,7 +1575,8 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
         productContext: ctx.productContext,
         tenantId: ctx.tenantId,
         repId: ctx.repId,
-        sessionId: ctx.sessionId
+        sessionId: ctx.sessionId,
+        signal: guidanceLease.signal
       });
     } catch (error: unknown) {
       emitLog({
@@ -1568,25 +1591,51 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
     }
   }
 
-  // Do not let a slow response for an older turn replace guidance for a newer one.
-  if (ctx.latestLeadSeq !== turnSeq) {
-    if (provisionalTimer) clearTimeout(provisionalTimer);
+  if (provisionalTimer) clearTimeout(provisionalTimer);
+  const guidanceStatus = guidanceLease.status();
+  const staleOrCancelled =
+    ctx.latestLeadSeq !== turnSeq ||
+    guidanceStatus === "cancelled" ||
+    guidanceStatus === "superseded";
+  // Do not let slow or explicitly cancelled work replace current guidance.
+  if (staleOrCancelled) {
     emitLog({
       tenantId: ctx.tenantId,
       repId: ctx.repId,
       session_id: ctx.sessionId,
       service: "server",
       eventType: "stale_coaching_dropped",
-      data: { turnSeq, latestLeadSeq: ctx.latestLeadSeq }
+      data: { turnSeq, latestLeadSeq: ctx.latestLeadSeq, guidanceStatus }
+    });
+    return;
+  }
+  if (guidanceIsDisabled(ctx)) {
+    ctx.guidance.cancel("guidance_disabled");
+    return;
+  }
+
+  const finalAt = new Date().toISOString();
+  if (guidanceStatus === "expired") {
+    sendCoachingPatch(ctx, playbookFallback, finalAt, guidanceId, {
+      phase: "final",
+      aiGenerated: false,
+      category: "general",
+      latencyMs: CONFIG.coachingFinalDeadlineMs,
+      memoryFactIds: [],
+      playbookStageId: playbookStage.id
+    });
+    emitLog({
+      tenantId: ctx.tenantId,
+      repId: ctx.repId,
+      session_id: ctx.sessionId,
+      service: "server",
+      eventType: "guidance_deadline_fallback",
+      data: { turnSeq, deadlineMs: CONFIG.coachingFinalDeadlineMs }
     });
     return;
   }
 
-  if (provisionalTimer) clearTimeout(provisionalTimer);
-  if (!aiResult && provisionalSent) return;
-
-  const finalAt = new Date().toISOString();
-  sendCoachingPatch(
+  const delivered = sendCoachingPatch(
     ctx,
     aiResult?.coaching ?? playbookFallback,
     finalAt,
@@ -1601,6 +1650,8 @@ async function onTranscriptFinal(ctx: SessionCtx, text: string, speaker: Speaker
       playbookStageId: playbookStage.id
     }
   );
+  if (delivered) ctx.guidance.complete(guidanceLease);
+  else ctx.guidance.cancel("final_patch_rejected");
 }
 
 function startSttMock(ctx: SessionCtx) {
@@ -1772,6 +1823,7 @@ wss.on("connection", (ws, request) => {
         learningPending: false,
         learningPendingForce: false,
         completedPlaybookStageIds: [],
+        guidance: new SessionGuidanceV2(),
         deliveryStyleObservations: [],
         deliveryLearningInFlight: false,
         deliveryLearningPending: false,
@@ -1892,6 +1944,7 @@ wss.on("connection", (ws, request) => {
       }
       const ctx = sessions.get(sessionId);
       if (ctx) {
+        ctx.guidance.cancel("session_stopped");
         scheduleConversationLearning(ctx, { force: true });
         scheduleSessionDeliveryStyleLearning(ctx, { force: true });
       }
@@ -1967,6 +2020,7 @@ wss.on("connection", (ws, request) => {
       if (socks.size === 0) {
         const ctx = sessions.get(sid);
         if (ctx) {
+          ctx.guidance.cancel("all_clients_disconnected");
           scheduleConversationLearning(ctx, { force: true });
           scheduleSessionDeliveryStyleLearning(ctx, { force: true });
         }
@@ -2068,6 +2122,7 @@ const sessionCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [sid, ctx] of sessions.entries()) {
     if (now - ctx.lastActivity > CONFIG.sessionTimeoutMs) {
+      ctx.guidance.cancel("session_timeout");
       scheduleConversationLearning(ctx, { force: true });
       scheduleSessionDeliveryStyleLearning(ctx, { force: true });
       sessions.delete(sid);

@@ -5,6 +5,7 @@ RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/server/package.json apps/server/package.json
 COPY apps/web/package.json apps/web/package.json
+COPY packages/runtime/package.json packages/runtime/package.json
 COPY packages/shared/package.json packages/shared/package.json
 RUN pnpm install --frozen-lockfile
 
@@ -12,6 +13,7 @@ FROM deps AS build
 WORKDIR /app
 COPY . .
 RUN pnpm -C packages/shared build \
+ && pnpm -C packages/runtime build \
  && pnpm -C apps/server build \
  && pnpm -C apps/web build
 
@@ -28,9 +30,11 @@ COPY --from=deps /app/apps/server/node_modules ./apps/server/node_modules
 COPY --from=build /app/apps/server/dist ./apps/server/dist
 COPY --from=build /app/apps/server/src/db/migrations ./apps/server/dist/db/migrations
 COPY --from=build /app/apps/web/dist ./apps/web/dist
+COPY --from=build /app/packages/runtime/dist ./packages/runtime/dist
 COPY --from=build /app/packages/shared/dist ./packages/shared/dist
 COPY --from=build /app/data/coaching ./data/coaching
 COPY apps/server/package.json ./apps/server/package.json
+COPY packages/runtime/package.json ./packages/runtime/package.json
 COPY packages/shared/package.json ./packages/shared/package.json
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN groupadd --system appgroup \

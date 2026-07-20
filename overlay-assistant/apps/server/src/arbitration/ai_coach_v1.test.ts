@@ -1,10 +1,12 @@
 import { fileURLToPath } from "node:url";
+import type OpenAI from "openai";
 import { describe, expect, it } from "vitest";
 import { buildStyleAwareCoachingContext, loadCoachingCorpus } from "../knowledge/coaching_corpus.js";
 import type { MemoryFact } from "../memory/personal_memory.js";
 import {
   buildCoachInput,
   buildCoachInstructions,
+  getAiCoaching,
   validateCoachOutput,
   type CoachOutput,
   type CoachRequest
@@ -53,6 +55,34 @@ function output(overrides: Partial<CoachOutput> = {}): CoachOutput {
 }
 
 describe("AI coach prompt", () => {
+  it("propagates cancellation to the OpenAI request without treating it as a model failure", async () => {
+    const controller = new AbortController();
+    let requestSignal: AbortSignal | undefined;
+    const client = {
+      responses: {
+        parse: async (_input: unknown, options?: { signal?: AbortSignal }) => {
+          requestSignal = options?.signal;
+          return new Promise((_resolve, reject) => {
+            options?.signal?.addEventListener("abort", () => {
+              const error = new Error("cancelled");
+              error.name = "AbortError";
+              reject(error);
+            }, { once: true });
+          });
+        }
+      }
+    } as unknown as OpenAI;
+    const pending = getAiCoaching(
+      { ...request(), signal: controller.signal },
+      client
+    );
+    await Promise.resolve();
+
+    expect(requestSignal).toBe(controller.signal);
+    controller.abort();
+    await expect(pending).resolves.toBeNull();
+  });
+
   it("binds interview coaching to source-backed personal evidence", () => {
     const instructions = buildCoachInstructions(
       { mode: "interview", targetRole: "IT support", company: "Example Co" },

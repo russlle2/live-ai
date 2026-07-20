@@ -180,6 +180,7 @@ export const CONFIG = {
   openaiTranscriptionDelay: process.env.OPENAI_TRANSCRIPTION_DELAY ?? "minimal",
   openaiRequestTimeoutMs: boundedEnvInteger("OPENAI_REQUEST_TIMEOUT_MS", 4500, 250, 120_000),
   coachingProvisionalDelayMs: boundedEnvInteger("COACHING_PROVISIONAL_DELAY_MS", 300, 100, 30_000),
+  coachingFinalDeadlineMs: boundedEnvInteger("COACHING_FINAL_DEADLINE_MS", 1500, 400, 30_000),
   openaiRealtimeTokenTtlSeconds: boundedEnvInteger("OPENAI_REALTIME_TOKEN_TTL_SECONDS", 600, 10, 7200),
   jwtSecret: process.env.JWT_SECRET ?? "",
   personalAccessCode: process.env.PERSONAL_ACCESS_CODE ?? "",

@@ -22,6 +22,9 @@ importers:
 
   apps/server:
     dependencies:
+      '@overlay-assistant/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
       '@overlay-assistant/shared':
         specifier: workspace:*
         version: link:../../packages/shared

@@ -1,4 +1,5 @@
 import { zodTextFormat } from "openai/helpers/zod";
+import type OpenAI from "openai";
 import type { ReasoningEffort } from "openai/resources/shared";
 import { z } from "zod";
 import type {
@@ -42,6 +43,7 @@ export type CoachRequest = {
   tenantId: string;
   repId: string;
   sessionId: string;
+  signal?: AbortSignal;
 };
 
 export const CoachOutputSchema = z.object({
@@ -411,8 +413,11 @@ export function isAiCoachEnabled(): boolean {
   return isOpenAIConfigured();
 }
 
-export async function getAiCoaching(req: CoachRequest): Promise<CoachResponse | null> {
-  const client = getOpenAIClient();
+export async function getAiCoaching(
+  req: CoachRequest,
+  clientOverride?: OpenAI | null
+): Promise<CoachResponse | null> {
+  const client = clientOverride === undefined ? getOpenAIClient() : clientOverride;
   if (!client) return null;
 
   const startMs = Date.now();
@@ -428,7 +433,10 @@ export async function getAiCoaching(req: CoachRequest): Promise<CoachResponse | 
       store: false,
       safety_identifier: openAISafetyIdentifier(req.tenantId, req.repId),
       prompt_cache_key: `live-rhetoric:${req.profile.mode}`
-    }, { timeout: CONFIG.openaiRequestTimeoutMs });
+    }, {
+      timeout: CONFIG.openaiRequestTimeoutMs,
+      ...(req.signal ? { signal: req.signal } : {})
+    });
 
     const latencyMs = Date.now() - startMs;
     const parsed = response.output_parsed;
@@ -491,6 +499,12 @@ export async function getAiCoaching(req: CoachRequest): Promise<CoachResponse | 
       latencyMs
     };
   } catch (error: unknown) {
+    if (
+      req.signal?.aborted ||
+      (error instanceof Error && error.name === "AbortError")
+    ) {
+      return null;
+    }
     const latencyMs = Date.now() - startMs;
     const message = error instanceof Error ? error.message : "unknown";
 
