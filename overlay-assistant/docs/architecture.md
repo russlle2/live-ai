@@ -4,8 +4,8 @@
 
 ```text
 Dedicated owner microphone ─ source=rep ─┐
-                                        ├─ separate Realtime transcription ─ transcript/session log
-User-shared remote audio ─ source=lead ─┘                                  │
+                                        ├─ AudioWorklet VAD ─ local faster-whisper or cloud Realtime ─ encrypted transcript archive
+User-shared remote audio ─ source=lead ─┘                                                        │
                                                                            ├─ rep: delivery comparison/style learning
                                                                            └─ lead turn ended
                                                                                   │
@@ -13,7 +13,7 @@ User-shared remote audio ─ source=lead ─┘                                 
                                                                                   │
             eligible personal facts + reviewed coaching examples + recent turns ─┤
                                                                                   ▼
-                                                                   OpenAI Responses API
+                                                      local OpenAI-compatible or cloud Responses API
                                                                                   │
                                                            structured, speakable best line
                                                                                   │
@@ -22,7 +22,15 @@ User-shared remote audio ─ source=lead ─┘                                 
                                                                     └─ phone companion PWA
 ```
 
-At session creation, a deterministic seven-stage playbook emits the exact greeting and keeps directly speakable lines available through goodbye. Each verified owner turn is paired only with the final suggestion successfully delivered for the same remote cycle. The redacted comparison is stored privately and learned asynchronously after enough observations; later prompts receive only eligible communication-style facts.
+At session creation, a deterministic seven-stage playbook emits the exact greeting and keeps directly speakable lines available through goodbye. Each verified owner turn is paired only with the final suggestion successfully delivered for the same remote cycle. Exact wording is retained only inside the encrypted comparison archive. Automatic style learning stores numeric features and requires 12 eligible observations across three sessions; accepted model wording and factual corrections are excluded from promotion.
+
+## Local-first runtime and interruptions
+
+Browser audio processing runs through `AudioWorklet`, with a compatibility fallback only where necessary. VAD advances from audio-frame duration rather than animation frames, so a backgrounded meeting tab does not stop endpointing. Each separated source emits canonical `runtime_event_v2` speech-start/end events. The reducer retains simultaneous active turns and emits an interruption only when an authoritative remote source begins while an owner turn remains active; mixed unknown speech can create overlap but never invents the remote identity.
+
+Every coaching cycle owns an abort signal and hard display deadline. New speech, mute, dismissal, session stop, or private-data purge aborts obsolete model work. Deadline expiry promotes the already-available deterministic line to a final delivery instead of leaving a provisional phase indefinitely.
+
+The server prefers a healthy loopback local STT service and local OpenAI-compatible coaching endpoint. Cloud OpenAI remains available when local providers are absent. The bundled faster-whisper service validates and bounds each PCM WAV turn, deletes its temporary file in `finally`, and returns an OpenAI-compatible JSON result.
 
 ## Speaker routing and directional evidence
 
@@ -56,10 +64,11 @@ The grounded path is network/model dependent. Private-data deletion increments a
 
 `personal_memory_v1` is an evidence bank rather than a mailbox dump. Each fact carries category, normalized text, keywords, source reference, confidence, sensitivity, temporality, validity dates, and owner-verification state.
 
-Automatic retrieval applies this policy before ranking:
+Automatic retrieval applies the active processing policy before ranking:
 
-- normal facts require review/conflict flags to be clear;
-- sensitive facts require both `userVerified: true` and clear review/conflict flags;
+- local personal mode may retrieve review-gated normal/sensitive context with explicit qualification and score penalties;
+- the output validator still blocks review-gated personal-history assertions;
+- cloud mode requires normal facts to be review-clear and sensitive facts to be both verified and review-clear;
 - restricted facts are never retrieved;
 - not-yet-valid and expired facts are excluded.
 
@@ -101,7 +110,7 @@ A session has one audio host and may have companion clients. The PWA supplies a 
 
 Documented relative runtime paths resolve from the `overlay-assistant` root; guarded private/control paths reject escapes from it. Git and Docker build exclusions are publication controls; they do not stop runtime reads/writes. The app Compose service bind-mounts `data/private`, while the speaker container receives only its dedicated named private/model volumes and speaker-specific environment values. The root `.env.local` is not mounted into the speaker.
 
-Google state is application-encrypted. The populated environment file/API keys, personal memory, session/style logs, managed auth state, and owner embedding are plaintext at rest; app-created private stores use `0700` directories/`0600` files. Deployment therefore requires full-disk or volume encryption and encrypted backups. Include the speaker named volume in the protection/retention plan or re-enroll after loss.
+Google state, personal memory, retained transcript turns, and suggestion/style comparison records use authenticated application encryption with automatic legacy plaintext migration. The populated environment file/API keys, managed auth state, PostgreSQL data, numeric style-feature log, and owner embedding still rely on `0700` directories/`0600` files plus host storage protection. Deployment therefore still requires full-disk or volume encryption and encrypted backups. Include the speaker named volume in the protection/retention plan or re-enroll after loss.
 
 The main Compose file keeps PostgreSQL and the speaker service internal and publishes the app to `127.0.0.1:8080` by default. The development override exposes database and speaker ports on host loopback only. LAN/phone access requires an authenticated HTTPS proxy/private tunnel and correct origin configuration. Set a broader app bind only when that perimeter is already in place.
 

@@ -8,6 +8,8 @@
 
 **Tech Stack:** TypeScript 5.9, Vitest 2, React 18, Express 4, OpenAI Responses API, pnpm workspaces
 
+**Execution status (2026-07-20):** Complete. All eight tasks shipped, with additional AudioWorklet VAD, local inference, encrypted archive/search, permissive local memory, and transport hardening. Automated/manual evidence and physical-platform exclusions are recorded in `docs/IMPLEMENTATION_CHECKPOINT.md`.
+
 ## Global Constraints
 
 - Keep the current browser application runnable throughout this slice.

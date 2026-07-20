@@ -5,12 +5,14 @@ Live Rhetoric is a private, single-owner communication copilot designed to put a
 ## Live behavior
 
 1. The laptop captures the local microphone as **You** and a user-selected tab/system-audio track as **Other person**.
-2. Each source has its own low-latency transcription session. Source separation is the primary identity signal, and only a verified remote turn triggers coaching.
-3. A safe cushion appears immediately, a deterministic provisional line follows if needed, and an accepted grounded OpenAI response replaces it when ready. New turns supersede stale generations. Before display, a deterministic guard rejects unknown memory citations, private identifiers/source references, weakly grounded personal/action/title/numeric/employer/credential claims, unverified insurance claims, unauthorized service promises, negotiation bluffs, credential requests, and destructive IT commands; rejection keeps the safe fallback.
-4. A phone can join the session as a companion display while the laptop remains the audio host.
-5. Every session opens with an exact greeting and includes a mode-specific, seven-stage path through the final goodbye.
-6. The next verified owner turn is compared with the delivered final line. Repeated, redacted differences become speaking-style memory.
-7. In an explicitly declared two-fixed-speaker setup, true stereo direction can supplement owner-voice verification. Three strong owner-side observations calibrate the side and two stable opposite-side observations are required before `Other`; conflicts remain `Unknown`.
+2. AudioWorklet-driven, audio-time VAD keeps each source independent even when a browser tab is backgrounded. Concurrent speech is retained as overlap, and a verified remote start during owner speech emits an interruption immediately.
+3. Each source uses local faster-whisper when its loopback service is healthy, otherwise the configured cloud transcription path. Source separation is the primary identity signal, and only a verified remote turn triggers coaching.
+4. A safe cushion appears immediately, a deterministic provisional line follows if needed, and an accepted grounded local-first or cloud response replaces it when ready. New speech aborts obsolete inference instead of merely hiding its result. Before display, a deterministic guard rejects unknown memory citations, private identifiers/source references, weakly grounded personal/action/title/numeric/employer/credential claims, unverified insurance claims, unauthorized service promises, negotiation bluffs, credential requests, and destructive IT commands; rejection keeps the safe fallback.
+5. A phone can join the session as a companion display while the laptop remains the audio host.
+6. Every session opens with an exact greeting and includes a mode-specific, seven-stage path through the final goodbye.
+7. Owner speech produces numeric style features without retaining exact phrasing. A profile changes only after at least 12 eligible observations across three sessions; accepted model wording and factual corrections do not train style.
+8. In an explicitly declared two-fixed-speaker setup, true stereo direction can supplement owner-voice verification. Three strong owner-side observations calibrate the side and two stable opposite-side observations are required before `Other`; conflicts remain `Unknown`.
+9. Chromium browsers can pop the current response into a native always-on-top Document Picture-in-Picture window.
 
 Google Meet and Zoom Web work only when the owner explicitly selects the call tab and enables its audio. Zoom desktop works only when the browser and operating system return audio for the selected window or system source. A phone PWA cannot directly capture protected same-device cellular or VoIP call audio. Its foreground microphone can hear an in-room conversation or a speakerphone playing from another device. Mono, dual-mono, overlap, movement, weak evidence, and conflicting cues remain `Unknown`; the owner can use **That was them — coach this** after checking the speaker.
 
@@ -36,17 +38,21 @@ The server loads environment values in this order:
 
 Documented relative runtime paths are resolved from `overlay-assistant`, regardless of the process working directory. Guarded private/control paths reject escapes from that root. Never commit a populated environment file.
 
+### Optional one-command Windows local AI
+
+On the target Windows 11 laptop, `scripts/setup-local-ai.ps1` installs `uv` and Ollama through WinGet, downloads the configured local coaching model, installs the locked faster-whisper service, updates repository-root `.env.local`, and starts both loopback services. The app automatically prefers healthy local coaching and transcription while retaining cloud providers as optional fallbacks.
+
 ## Authentication and phone pairing
 
 Authentication is fail-closed by default. In host development, if `JWT_SECRET` and `PERSONAL_ACCESS_CODE` are not both supplied, the server creates strong local credentials in `data/private/personal_auth.local.json` with owner-only permissions. The laptop UI can retrieve the generated pairing code only when the server directly observes the peer as loopback; it fills the local login and displays the code for the phone. Enter it once to pair the current phone browser session and obtain its owner JWT; re-entry is required after browser session storage is cleared or credentials rotate. Do not send the code in chat or store it in the repository.
 
-Do not depend on loopback bootstrap inside Docker or behind a reverse proxy: bridge/NAT/proxy traffic may not appear as loopback to the server even when the published host port is `127.0.0.1`. Container and reverse-proxy deployments must explicitly set `JWT_SECRET`, `PERSONAL_ACCESS_CODE`, and a distinct `GOOGLE_STORAGE_ENCRYPTION_KEY` before startup.
+Do not depend on loopback bootstrap inside Docker or behind a reverse proxy: bridge/NAT/proxy traffic may not appear as loopback to the server even when the published host port is `127.0.0.1`. Container and reverse-proxy deployments must explicitly set `JWT_SECRET`, `PERSONAL_ACCESS_CODE`, and `PRIVATE_STORAGE_ENCRYPTION_KEY`; add a distinct `GOOGLE_STORAGE_ENCRYPTION_KEY` when Google sync is enabled.
 
 Supplying both environment values disables managed rotation; `JWT_SECRET` must contain at least 32 characters and `PERSONAL_ACCESS_CODE` at least 12. `ALLOW_INSECURE_DEMO_AUTH=true` is the only unauthenticated mode. It is for a temporary loopback-only demo and must never be used on a LAN or internet endpoint.
 
 For a phone:
 
-1. Configure explicit `JWT_SECRET`, `PERSONAL_ACCESS_CODE`, and `GOOGLE_STORAGE_ENCRYPTION_KEY`, then put the app behind an authenticated HTTPS reverse proxy or private HTTPS tunnel; leave the app's host port on loopback.
+1. Configure explicit `JWT_SECRET`, `PERSONAL_ACCESS_CODE`, `PRIVATE_STORAGE_ENCRYPTION_KEY`, and—when used—`GOOGLE_STORAGE_ENCRYPTION_KEY`, then put the app behind an authenticated HTTPS reverse proxy or private HTTPS tunnel; leave the app's host port on loopback.
 2. Open the HTTPS deployment on the laptop and start an **Audio host** session.
 3. Share the call tab/window and enable its audio.
 4. Open the same deployment on the phone, enter the pairing code, choose **Companion**, and enter the laptop session ID.
@@ -62,27 +68,28 @@ Git and Docker exclusions prevent publication; they do not disable runtime use. 
 | --- | --- | --- |
 | OpenAI key | repository-root `.env.local` | loaded server-side at startup; never returned to the PWA |
 | Authentication state | `data/private/personal_auth.local.json` | generated and reused when explicit auth secrets are absent |
-| Personal memory | `data/private/personal_memory.local.json` | relevant eligible facts retrieved for verified remote turns |
-| Transcript/style logs | `data/private/sessions/` | turns and delivery observations are written automatically and distilled in the background |
+| Personal memory | `data/private/personal_memory.local.json` | authenticated encryption at rest; relevant eligible facts retrieved for verified remote turns |
+| Transcript/style logs | `data/private/sessions/` | independently encrypted turn/comparison records retained indefinitely by default, plus non-text numeric style features |
 | Google state | `data/private/google/` | encrypted OAuth material, resumable cursors, and minimized source cache |
-| Owner embedding, local service | `data/private/speaker/owner_embedding.json` | three clean owner-microphone turns enroll it; raw clips are discarded |
+| Owner embedding, local service | `data/private/speaker/owner_embedding.json` | three mutually consistent owner-microphone turns enroll it; raw clips are discarded |
 | Owner embedding, Compose | named volume `speaker_private` | same purpose without bind-mounting the root environment or entire private directory into the speaker container |
 
-The memory retrieval rule is exact:
+Memory policy depends on the processing boundary:
 
-- a normal fact is eligible only when no review/conflict flag remains;
-- a sensitive fact is eligible only when the owner has verified it and no review/conflict flag remains;
-- a restricted fact is never included in automatic coaching prompts.
+- local personal coaching may retrieve normal and sensitive review-gated context with an explicit `review-required` marker and ranking penalty;
+- spoken personal-history claims still require review-clear supporting evidence;
+- cloud coaching uses the stricter review-clear/verified policy;
+- restricted facts are never included in automatic coaching prompts.
 
 Confidence, provenance, temporality, validity dates, and current conflicts still affect ranking or gating. The public `data/personal_memory.example.json` is fabricated schema documentation, not owner data.
 
-Conversation-derived employment, education, skill, achievement, project, and career-story claims are stored automatically but always marked for owner review before live retrieval. Unsupported managerial actions or titles are rejected during extraction; weak evidence overlap remains quarantined for review.
+Conversation-derived employment, education, skill, achievement, project, and career-story claims are stored automatically and marked for owner review. Local personal mode can use them as tentative context for clarification, but deterministic output validation prevents them from becoming asserted biography until review clears. Unsupported managerial actions or titles are rejected during extraction.
 
 Use **Review facts** in the automation panel to inspect normalized fact text and source metadata, verify a claim as written, correct and verify it, or delete it. Verification clears its review flags; it does not change the policy above. In particular, a normal review-clear fact may already be eligible before confirmation, while a restricted fact remains excluded even after confirmation. The panel does not reveal cached source bodies, OAuth material, or hidden credentials.
 
 Google OAuth and cache files use authenticated AES-256-GCM encryption. Fully managed host bootstrap creates a separate storage key automatically. When auth is environment-managed, `GOOGLE_STORAGE_ENCRYPTION_KEY` is required and must contain at least 32 characters; the app does not reuse `JWT_SECRET`. Keep the storage key stable or the encrypted state cannot be read. Legacy plaintext Google state is migrated on a successful read.
 
-The populated environment file/API keys, personal memory, transcript/style logs, local auth bootstrap file, and speaker embedding are not all application-encrypted; private stores use restrictive `0700` directory/`0600` file permissions where the app creates them. Git exclusion and Unix permissions are not encryption: require full-disk or encrypted-volume protection and encrypted, owner-controlled backups. For Compose, include the `speaker_private` volume in that policy or simply re-enroll after loss.
+Personal memory, transcripts, and suggestion/style comparison records now use authenticated application encryption with automatic plaintext migration. The populated environment file/API keys, managed auth bootstrap file, PostgreSQL data, numeric style-feature log, and speaker embedding are not all application-encrypted; private stores also use restrictive `0700` directory/`0600` file permissions. Keep full-disk or encrypted-volume protection and encrypted, owner-controlled backups. For Compose, include the `speaker_private` volume in that policy or simply re-enroll after loss.
 
 ## One-time Gmail and Drive connection
 
@@ -127,7 +134,9 @@ The root GitHub Actions workflow also rejects tracked private runtime paths. See
 apps/web                 React/Vite PWA and audio/companion UI
 apps/server              API, WebSocket router, coaching, memory, integrations
 packages/shared          versioned session, playbook, and transport types
+packages/runtime         provider-neutral events, interruption state, deadlines, and slow style profiles
 services/speaker         pinned Hugging Face owner-verification fallback
+services/stt             locked local faster-whisper OpenAI-compatible service
 data/private             ignored runtime state; automatically used, not encrypted as a whole
 data/coaching            reviewed live contrasts, manifest, and staging audit
 docs                     active operating, architecture, and product-truth documents

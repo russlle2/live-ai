@@ -6,7 +6,7 @@ The exclusions prevent publication, not runtime access. The server automatically
 
 ## Is all private data encrypted at rest?
 
-No. Google OAuth material, sync cursors, and cached records are application-encrypted with authenticated AES-256-GCM. The populated environment file/API keys, personal memory, transcript/style logs, managed auth file, and speaker embedding are plaintext at rest; app-created private stores use owner-only filesystem permissions. Protect the host and Docker volumes with full-disk or volume encryption and use encrypted, owner-controlled backups. Git exclusion is not encryption.
+Not all stores are encrypted by the application. Google state, personal memory, transcript turns, and suggestion/style comparisons use authenticated encryption. The populated environment file/API keys, managed auth file, PostgreSQL data, numeric style-feature logs, and speaker embedding still rely on owner-only filesystem permissions and host disk/volume encryption. Use encrypted, owner-controlled backups. Git exclusion is not encryption.
 
 ## How do I log in if I did not configure secrets?
 
@@ -24,17 +24,21 @@ Not reliably. An ordinary PWA cannot directly capture protected cellular or VoIP
 
 The owner must initiate screen/tab sharing and enable audio. Meet and Zoom Web usually work best by sharing the call tab. Zoom desktop audio is supported only if Chrome/Edge and the operating system expose an audio track for the selected window/system source. If no separate remote track exists, the app must use mixed/unknown behavior instead of pretending attribution is certain.
 
+## Can transcription and coaching stay on my laptop?
+
+Yes. A healthy loopback faster-whisper service is preferred automatically for transcription, and a loopback OpenAI-compatible Ollama/llama.cpp server is preferred for coaching. `scripts/setup-local-ai.ps1` installs and configures both paths on Windows. Cloud OpenAI remains optional for Realtime transcription, deeper extraction, or fallback.
+
+## Will one off-script answer immediately change future wording?
+
+No. Verified owner turns are reduced to numeric style features rather than retained as reusable phrases. Promotion requires at least 12 eligible observations across three sessions, rejects contradictory or session-dominated evidence, moves each feature only a bounded amount, and excludes accepted model wording and factual corrections. Exact wording becomes reusable only when the owner explicitly pins it.
+
 ## How does the app know which person spoke?
 
 A dedicated owner microphone and a separately shared remote track are authoritative. In mixed audio, a strong owner-embedding match may label **You**, but a non-match alone never proves **Other person**. Optional direction requires an explicit two-fixed-speaker declaration, true stereo input, repeated owner-side calibration, repeated opposite-side evidence, and no overlap or conflicting signals. Otherwise the turn stays `Unknown` until the owner labels it.
 
 ## Which personal facts can enter an automatic suggestion?
 
-- A normal fact only when it has no outstanding review/conflict flag.
-- A sensitive fact only when it is owner-verified and has no outstanding review/conflict flag.
-- A restricted fact never.
-
-The app also checks validity dates and relevance. A stored fact is not automatically prompt-eligible.
+Local personal mode may retrieve normal or sensitive review-gated context, but marks it `review-required`, ranks it below verified evidence, and permits clarification rather than an asserted biography. Cloud coaching requires review-clear evidence and owner verification for sensitive facts. Restricted facts never enter automatic prompts. Validity dates and relevance still apply.
 
 ## Does the app guarantee that every suggested claim is true?
 
