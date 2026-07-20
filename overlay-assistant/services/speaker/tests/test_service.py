@@ -10,7 +10,11 @@ import wave
 from collections.abc import Sequence
 from pathlib import Path
 
-from live_ai_speaker.service import EnrollmentCancelledError, SpeakerVerificationService
+from live_ai_speaker.service import (
+    EnrollmentCancelledError,
+    EnrollmentConsistencyError,
+    SpeakerVerificationService,
+)
 from live_ai_speaker.store import OwnerProfileStore
 
 
@@ -124,6 +128,19 @@ class SpeakerVerificationServiceTests(unittest.TestCase):
             )
             self.assertEqual(service.enroll_owner(wav_bytes()).sample_count, 1)
             self.assertEqual(service.enroll_owner(wav_bytes()).sample_count, 2)
+
+    def test_rejects_an_inconsistent_enrollment_embedding_without_poisoning_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service, _, profile_path = self.make_service(
+                directory, [(1.0, 0.0), (0.0, 1.0)]
+            )
+            self.assertEqual(service.enroll_owner(wav_bytes()).sample_count, 1)
+            with self.assertRaises(EnrollmentConsistencyError):
+                service.enroll_owner(wav_bytes())
+
+            stored = json.loads(profile_path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["sampleCount"], 1)
+            self.assertAlmostEqual(stored["embedding"][0], 1.0)
 
     def test_partial_enrollment_stays_unknown_and_resumes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

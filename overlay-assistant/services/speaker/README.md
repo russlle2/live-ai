@@ -104,6 +104,7 @@ curl --fail --request DELETE http://127.0.0.1:8791/v1/owner
 | `SPEAKER_MODEL_ID` | `anton-l/wav2vec2-base-superb-sv` | Hugging Face XVector model ID |
 | `SPEAKER_MODEL_REVISION` | `eb0be47779dda10620d068ab579fca970ee7e417` | Immutable Hub revision for reproducible deployment |
 | `SPEAKER_OWNER_THRESHOLD` | `0.90` | Minimum cosine similarity for `owner` |
+| `SPEAKER_ENROLLMENT_CONSISTENCY_THRESHOLD` | `0.65` | Reject a new enrollment sample that conflicts with the current owner profile |
 | `SPEAKER_DEVICE` | `auto` | `auto`, `cpu`, or `cuda` |
 | `SPEAKER_LOCAL_FILES_ONLY` | `false` | Refuse Hub downloads when `true` |
 | `SPEAKER_MODEL_CACHE_DIR` / `HF_HOME` | Hugging Face default | Model cache location |

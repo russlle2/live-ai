@@ -969,12 +969,17 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
     };
 
     try {
+      const remainingEnrollmentSamples = normalizeOwnerEnrollmentProgress({
+        sampleCount: uploadedSegments,
+        requiredSampleCount
+      }).remainingSamples || 1;
+      const maxCaptureSegments = Math.min(
+        10,
+        Math.max(remainingEnrollmentSamples, remainingEnrollmentSamples * 3)
+      );
       enrollmentCaptureRef.current = await startOwnerVoiceSegmentCapture({
         stream: micStream,
-        maxSegments: normalizeOwnerEnrollmentProgress({
-          sampleCount: uploadedSegments,
-          requiredSampleCount
-        }).remainingSamples || 1,
+        maxSegments: maxCaptureSegments,
         onError: failEnrollment,
         onSegment: (segment, inputSampleRate) => {
           if (terminal || generation !== enrollmentGenerationRef.current) return;
@@ -1006,6 +1011,18 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
             const result = (await response.json().catch(() => ({}))) as SpeakerEnrollmentResponse;
             // The Blob and its source array become unreachable after this request;
             // neither browser storage nor the backend proxy persists raw audio.
+            if (response.status === 422) {
+              if (collectedSegments >= maxCaptureSegments) {
+                throw new Error(
+                  "The captured voice samples were inconsistent. Enrollment will retry next session."
+                );
+              }
+              publishVoiceEnrollment(currentStatus(
+                "collecting",
+                "One inconsistent voice sample was skipped; keep speaking naturally."
+              ));
+              return;
+            }
             if (!response.ok || result.accepted !== true) {
               throw new Error(result.message || result.error || `Owner-voice enrollment failed (${response.status}).`);
             }
