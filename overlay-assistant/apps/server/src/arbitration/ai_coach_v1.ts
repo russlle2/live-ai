@@ -14,8 +14,9 @@ import { formatMemoryContext } from "../memory/personal_memory.js";
 import { logTokenUsage } from "../middleware/token_usage.js";
 import { emitLog } from "../obs/emitLog.js";
 import {
-  getOpenAIClient,
-  isOpenAIConfigured,
+  getCoachingOpenAIClient,
+  getCoachingProviderConfig,
+  isCoachingConfigured,
   openAISafetyIdentifier
 } from "../openai/client.js";
 
@@ -410,21 +411,27 @@ export function validateCoachOutput(req: CoachRequest, output: CoachOutput): Coa
 }
 
 export function isAiCoachEnabled(): boolean {
-  return isOpenAIConfigured();
+  return isCoachingConfigured();
 }
 
 export async function getAiCoaching(
   req: CoachRequest,
   clientOverride?: OpenAI | null
 ): Promise<CoachResponse | null> {
-  const client = clientOverride === undefined ? getOpenAIClient() : clientOverride;
-  if (!client) return null;
+  const provider = clientOverride === undefined
+    ? getCoachingProviderConfig()
+    : { kind: "cloud" as const, apiKey: "test", model: CONFIG.openaiModel };
+  const client = clientOverride === undefined
+    ? getCoachingOpenAIClient()
+    : clientOverride;
+  if (!client || !provider) return null;
+  const model = provider.model;
 
   const startMs = Date.now();
 
   try {
     const response = await client.responses.parse({
-      model: CONFIG.openaiModel,
+      model,
       instructions: buildCoachInstructions(req.profile, req.memoryFacts, req.productContext, req.coachingContext),
       input: buildCoachInput(req),
       text: { format: zodTextFormat(CoachOutputSchema, "live_rhetoric_coaching") },
@@ -450,7 +457,7 @@ export async function getAiCoaching(
         tenantId: req.tenantId,
         repId: req.repId,
         sessionId: req.sessionId,
-        model: CONFIG.openaiModel,
+        model,
         promptTokens: usage.input_tokens,
         completionTokens: usage.output_tokens,
         totalTokens: usage.total_tokens,
@@ -467,7 +474,7 @@ export async function getAiCoaching(
         service: "ai_coach",
         eventType: "ai_coaching_rejected",
         level: "WARN",
-        data: { latencyMs, model: CONFIG.openaiModel, reason: validation.reason }
+        data: { latencyMs, model, provider: provider.kind, reason: validation.reason }
       });
       return null;
     }
@@ -481,7 +488,8 @@ export async function getAiCoaching(
       eventType: "ai_coaching_success",
       data: {
         latencyMs,
-        model: CONFIG.openaiModel,
+        model,
+        provider: provider.kind,
         category: parsed.category,
         memoryFactsUsed: usedMemoryIds.length,
         coachingExamplesRetrieved: req.coachingContext?.examples.length ?? 0,
@@ -518,7 +526,8 @@ export async function getAiCoaching(
       data: {
         latencyMs,
         error: message.slice(0, 200),
-        model: CONFIG.openaiModel
+        model,
+        provider: provider.kind
       }
     });
 

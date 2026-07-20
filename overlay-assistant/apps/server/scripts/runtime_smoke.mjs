@@ -32,7 +32,7 @@ const server = spawn(process.execPath, ["dist/index.js"], {
     DATABASE_URL: "postgres://smoke:smoke@127.0.0.1:1/smoke",
     SPEAKER_SERVICE_URL: "http://127.0.0.1:1",
     STT_MOCK: "0",
-    PERSONAL_MEMORY_PATH: path.join(overlayRoot, "data/personal_memory.example.json"),
+    PERSONAL_MEMORY_PATH: path.join(temporary, "personal-memory.json"),
     SESSION_LOG_DIR: temporary,
     WEB_DIST_PATH: path.join(overlayRoot, "apps/web/dist")
   },

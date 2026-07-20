@@ -100,11 +100,19 @@ import { SlowStyleLearnerV2 } from "./memory/slow_style_profile_v2.js";
 import { GuidanceFeedbackStoreV2 } from "./session/guidance_feedback_v2.js";
 import { SessionGuidanceV2 } from "./session/session_guidance_v2.js";
 import { createRealtimeTranscriptionClientSecret } from "./openai/realtime_token.js";
-import { getOpenAIClient, openAISafetyIdentifier } from "./openai/client.js";
+import {
+  getCoachingProviderConfig,
+  getOpenAIClient,
+  openAISafetyIdentifier
+} from "./openai/client.js";
 import {
   createSpeakerServiceClient,
   SpeakerServiceError
 } from "./integrations/speaker/speaker_service.js";
+import {
+  LocalSttClient,
+  LocalSttError
+} from "./integrations/local_stt/local_stt_service.js";
 import {
   createGoogleSyncRouter,
   GoogleMemorySync,
@@ -443,6 +451,12 @@ const wsConnectionsByIp = new Map<string, number>();
 const slowStyleLearner = new SlowStyleLearnerV2({
   directory: CONFIG.sessionLogDir,
   upsert: upsertMemoryFacts
+});
+const localSttService = new LocalSttClient({
+  baseUrl: CONFIG.localSttBaseUrl,
+  model: CONFIG.localSttModel,
+  apiKey: CONFIG.localSttApiKey,
+  timeoutMs: CONFIG.localSttTimeoutMs
 });
 const speakerService = createSpeakerServiceClient({
   // Local development needs no repeated setup; Docker overrides this with the
@@ -957,6 +971,64 @@ app.delete("/api/memory/facts/:id", requireAuth, asyncRoute(async (req, res) => 
     : sendErr(res, 404, "memory_fact_not_found");
 }));
 
+const localSttRateLimit = createRouteRateLimit({
+  key: "local_stt",
+  max: 180,
+  windowMs: 60_000,
+  keySelector: (req) => req.auth?.repId ?? req.ip ?? "unknown_user"
+});
+const localSttWavBody = express.raw({
+  type: ["audio/wav", "audio/x-wav"],
+  limit: localSttService.maxAudioBytes
+});
+
+app.get("/api/transcription/status", requireAuth, asyncRoute(async (_req, res) => {
+  const local = await localSttService.status();
+  return sendOk(res, {
+    preferred: local.available ? "local" : CONFIG.openaiApiKey ? "cloud" : "unavailable",
+    local,
+    cloud: {
+      configured: Boolean(CONFIG.openaiApiKey),
+      model: CONFIG.openaiApiKey ? CONFIG.openaiTranscriptionModel : null
+    }
+  });
+}));
+
+app.post(
+  "/api/transcription/local",
+  requireAuth,
+  localSttRateLimit,
+  localSttWavBody,
+  asyncRoute(async (req, res) => {
+    if (!Buffer.isBuffer(req.body)) {
+      return sendErr(res, 415, "audio_wav_required");
+    }
+    try {
+      const audio = new Uint8Array(
+        req.body.buffer,
+        req.body.byteOffset,
+        req.body.byteLength
+      );
+      const result = await localSttService.transcribe(audio, {
+        language: typeof req.query.language === "string"
+          ? req.query.language
+          : "en"
+      });
+      return sendOk(res, result);
+    } catch (error) {
+      if (error instanceof LocalSttError) {
+        return sendErr(
+          res,
+          error.status,
+          "local_stt_error",
+          error.message
+        );
+      }
+      throw error;
+    }
+  })
+);
+
 const speakerEnrollmentRateLimit = createRouteRateLimit({
   key: "speaker_enrollment",
   max: 12,
@@ -1062,7 +1134,7 @@ if (googleSync) {
 }
 
 app.get("/api/runtime/status", requireAuth, asyncRoute(async (_req, res) => {
-  const [memory, voice, google, coaching] = await Promise.all([
+  const [memory, voice, google, coaching, transcription] = await Promise.all([
     getMemoryStats(),
     speakerService.health(),
     googleSync?.status() ?? Promise.resolve({
@@ -1083,7 +1155,8 @@ app.get("/api/runtime/status", requireAuth, asyncRoute(async (_req, res) => {
       },
       state: null
     }),
-    coachingCorpusState
+    coachingCorpusState,
+    localSttService.status()
   ]);
   const googleState = google.state;
   const gmailLastSyncAt = googleState?.gmail?.lastSyncAt;
@@ -1092,13 +1165,15 @@ app.get("/api/runtime/status", requireAuth, asyncRoute(async (_req, res) => {
     .filter((value): value is string => Boolean(value))
     .sort()
     .at(-1);
+  const coachingProvider = getCoachingProviderConfig();
 
   return sendOk(res, {
     automation: {
       apiKey: {
-        configured: Boolean(CONFIG.openaiApiKey),
+        configured: Boolean(coachingProvider),
         serverOnly: true,
-        liveModel: CONFIG.openaiModel,
+        provider: coachingProvider?.kind ?? "deterministic",
+        liveModel: coachingProvider?.model ?? "deterministic",
         transcriptionModel: CONFIG.openaiTranscriptionModel
       },
       memory: {
@@ -1115,6 +1190,9 @@ app.get("/api/runtime/status", requireAuth, asyncRoute(async (_req, res) => {
       transcripts: {
         automaticCapture: true,
         automaticLearning: true,
+        localConfigured: transcription.configured,
+        localAvailable: transcription.available,
+        localModel: transcription.model,
         learningIntervalTurns: CONVERSATION_LEARNING_TURN_INTERVAL,
         automaticDeliveryComparison: true,
         automaticSpeakingStyleLearning: true,
@@ -2035,6 +2113,7 @@ app.get("/api/health/metrics", requireAuth, (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const activeSessions = sessions.size;
   const activeConnections = [...socketsBySession.values()].reduce((sum, s) => sum + s.size, 0);
+  const coachingProvider = getCoachingProviderConfig();
   sendOk(res, {
     activeSessions,
     activeConnections,
@@ -2042,18 +2121,21 @@ app.get("/api/health/metrics", requireAuth, (_req, res) => {
     memoryMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
     arbitrationLocus: ARBITRATION_LOCUS,
     aiCoachEnabled: isAiCoachEnabled(),
-    aiModel: CONFIG.openaiModel
+    aiModel: coachingProvider?.model ?? null,
+    aiProvider: coachingProvider?.kind ?? "deterministic"
   });
 });
 
 /* ── AI status endpoint ────────────────────────────────────── */
 app.get("/api/ai-status", requireAuth, (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
+  const coachingProvider = getCoachingProviderConfig();
   sendOk(res, {
     aiCoachEnabled: isAiCoachEnabled(),
-    model: isAiCoachEnabled() ? CONFIG.openaiModel : null,
-    deepModel: isAiCoachEnabled() ? CONFIG.openaiDeepModel : null,
-    transcriptionModel: isAiCoachEnabled() ? CONFIG.openaiTranscriptionModel : null,
+    provider: coachingProvider?.kind ?? "deterministic",
+    model: coachingProvider?.model ?? null,
+    deepModel: CONFIG.openaiApiKey ? CONFIG.openaiDeepModel : null,
+    transcriptionModel: CONFIG.openaiApiKey ? CONFIG.openaiTranscriptionModel : null,
     mode: isAiCoachEnabled() ? "ai" : "deterministic"
   });
 });
@@ -2192,7 +2274,8 @@ server.listen(CONFIG.port, CONFIG.host, () => {
   // eslint-disable-next-line no-console
   console.log(`[server] listening on http://${CONFIG.host}:${CONFIG.port}`);
   // eslint-disable-next-line no-console
-  console.log(`[server] WebSocket path: ${CONFIG.wsPath} | AI: ${isAiCoachEnabled() ? CONFIG.openaiModel : "deterministic"} | Locus: ${ARBITRATION_LOCUS}`);
+  const coachingProvider = getCoachingProviderConfig();
+  console.log(`[server] WebSocket path: ${CONFIG.wsPath} | AI: ${coachingProvider ? `${coachingProvider.kind}:${coachingProvider.model}` : "deterministic"} | Locus: ${ARBITRATION_LOCUS}`);
   googleSync?.startBackgroundSync({
     onError: (error) => {
       emitLog({

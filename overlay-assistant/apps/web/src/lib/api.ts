@@ -57,6 +57,78 @@ export async function postRuntimeEvent(
   });
 }
 
+export type TranscriptionRuntimeStatus = {
+  preferred: "local" | "cloud" | "unavailable";
+  local: {
+    configured: boolean;
+    available: boolean;
+    model: string | null;
+  };
+  cloud: {
+    configured: boolean;
+    model: string | null;
+  };
+};
+
+export async function getTranscriptionRuntimeStatus(
+  httpBase?: string,
+  token?: string | null
+): Promise<TranscriptionRuntimeStatus> {
+  const data = await requestJson<TranscriptionRuntimeStatus & { ok: true }>(
+    "/api/transcription/status",
+    httpBase,
+    { token }
+  );
+  return data;
+}
+
+export async function transcribeLocalTurn(
+  wav: Uint8Array,
+  httpBase?: string,
+  token?: string | null,
+  signal?: AbortSignal
+): Promise<{ text: string; model: string }> {
+  const base = httpBase || "http://localhost:8080";
+  const copied = new ArrayBuffer(wav.byteLength);
+  new Uint8Array(copied).set(wav);
+  const response = await fetch(`${base}/api/transcription/local?language=en`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "audio/wav",
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    body: copied,
+    cache: "no-store",
+    signal
+  });
+  const payload = await response.json().catch(() => ({})) as {
+    text?: unknown;
+    model?: unknown;
+    message?: unknown;
+    error?: unknown;
+  };
+  if (!response.ok) {
+    throw new Error(
+      typeof payload.message === "string"
+        ? payload.message
+        : typeof payload.error === "string"
+          ? payload.error
+          : `Local transcription failed (${response.status}).`
+    );
+  }
+  if (
+    typeof payload.text !== "string" ||
+    !payload.text.trim() ||
+    typeof payload.model !== "string"
+  ) {
+    throw new Error("Local transcription returned an invalid response.");
+  }
+  return {
+    text: payload.text.trim().slice(0, 20_000),
+    model: payload.model.slice(0, 200)
+  };
+}
+
 export async function login(
   credentials: { tenantId: string; repId: string; role?: "rep" | "admin" | "viewer"; accessCode?: string },
   httpBase?: string
@@ -72,6 +144,7 @@ export type RuntimeAutomationStatus = {
   apiKey: {
     configured: boolean;
     serverOnly: boolean;
+    provider: "local" | "cloud" | "deterministic";
     liveModel: string;
     transcriptionModel: string;
   };
@@ -94,6 +167,9 @@ export type RuntimeAutomationStatus = {
   transcripts: {
     automaticCapture: boolean;
     automaticLearning: boolean;
+    localConfigured: boolean;
+    localAvailable: boolean;
+    localModel: string | null;
     learningIntervalTurns: number;
     automaticDeliveryComparison: boolean;
     automaticSpeakingStyleLearning: boolean;

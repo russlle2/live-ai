@@ -5,6 +5,10 @@ import {
   type AudioFrameCapture
 } from "./audioFrameCapture";
 import {
+  getTranscriptionRuntimeStatus,
+  transcribeLocalTurn
+} from "./api";
+import {
   DirectionalSpeakerFusion,
   estimateStereoDirection,
   interpretOwnerVerifierResult,
@@ -409,6 +413,175 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
     }
     return unknownDecision(fusion.reason, localTurnId, direction);
   }, [publishDirectionalStatus]);
+
+  const createLocalTranscriber = useCallback(async (
+    stream: MediaStream,
+    outputSource: AudioSource
+  ) => {
+    const audioTrack = stream.getAudioTracks()[0];
+    if (!audioTrack) throw new Error("The selected local audio source has no audio track.");
+    const AudioContextCtor = window.AudioContext || (window as typeof window & {
+      webkitAudioContext?: typeof AudioContext;
+    }).webkitAudioContext;
+    if (!AudioContextCtor) throw new Error("Web Audio is required for local transcription.");
+
+    const audioContext = new AudioContextCtor();
+    if (audioContext.state === "suspended") void audioContext.resume().catch(() => undefined);
+    const sourceNode = audioContext.createMediaStreamSource(stream);
+    const mixedMode = outputSource === "unknown";
+    const reportedChannels = audioTrack.getSettings().channelCount;
+    const channelCount: 1 | 2 = typeof reportedChannels === "number" && reportedChannels >= 2 ? 2 : 1;
+    const recorder = new SynchronizedTurnAudioRecorder({
+      sampleRate: audioContext.sampleRate,
+      channelCount,
+      maxDurationMs: 15_000
+    });
+    const captureGeneration = enrollmentGenerationRef.current;
+    const runtimeEvents = new SpeechRuntimeEventFactoryV2({
+      sessionId: callbackRef.current.sessionId,
+      sourceId: `local-${outputSource}`,
+      speaker: outputSource === "rep"
+        ? "owner"
+        : outputSource === "lead"
+          ? "remote"
+          : "unknown",
+      provenance: mixedMode ? "unverified" : "separated_channel",
+      confidence: mixedMode ? 0 : 1
+    });
+    const vad = new StreamingVadV2({
+      sampleRate: audioContext.sampleRate,
+      minimumSpeechMs: 120,
+      silenceToEndMs: 460,
+      maximumSpeechMs: 15_000
+    });
+    const controllers = new Set<AbortController>();
+    let turnSequence = 0;
+    let stopped = false;
+    let transcriptionQueue = Promise.resolve();
+
+    const transcribe = (recorded: RecordedTurnAudio) => {
+      turnSequence += 1;
+      const localTurnId = `${captureGeneration}-${turnSequence}`;
+      const decision = mixedMode
+        ? classifyMixedTurn(recorded, captureGeneration, localTurnId)
+        : Promise.resolve({
+          source: outputSource,
+          attribution: {
+            provenance: outputSource === "rep"
+              ? "dedicated_owner_mic" as const
+              : "dedicated_browser_tab" as const,
+            confidence: 1,
+            reason: outputSource === "rep"
+              ? "dedicated_owner_mic"
+              : "dedicated_browser_tab"
+          }
+        });
+      const wav = encodePcm16Wav(recorded.mono, recorded.sampleRate, {
+        maxDurationSeconds: 15
+      });
+      callbackRef.current.onInterim?.({
+        source: outputSource,
+        text: "Transcribing locally…"
+      });
+      transcriptionQueue = transcriptionQueue.catch(() => undefined).then(async () => {
+        if (stopped || captureGeneration !== enrollmentGenerationRef.current) return;
+        const controller = new AbortController();
+        controllers.add(controller);
+        try {
+          const token = await callbackRef.current.getAuthToken();
+          const [transcript, speakerDecision] = await Promise.all([
+            transcribeLocalTurn(
+              wav,
+              callbackRef.current.httpBase,
+              token,
+              controller.signal
+            ),
+            decision
+          ]);
+          if (
+            !stopped &&
+            captureGeneration === enrollmentGenerationRef.current &&
+            mountedRef.current
+          ) {
+            callbackRef.current.onFinal(
+              transcript.text,
+              speakerDecision.source,
+              speakerDecision.attribution
+            );
+          }
+        } finally {
+          controllers.delete(controller);
+          callbackRef.current.onInterim?.({ source: outputSource, text: "" });
+        }
+      }).catch((error: unknown) => {
+        if (!stopped) {
+          setMessage(
+            error instanceof Error
+              ? error.message
+              : "Local transcription failed."
+          );
+        }
+      });
+    };
+
+    let frameCapture: AudioFrameCapture;
+    try {
+      frameCapture = await startAudioFrameCapture({
+        audioContext,
+        source: sourceNode,
+        channelCount,
+        onFrame: ({ left, right }) => {
+          recorder.push(left, right);
+          for (const vadEvent of vad.push(left)) {
+            if (vadEvent === "speech_started") {
+              callbackRef.current.onRuntimeEvent?.(runtimeEvents.start());
+              recorder.begin();
+            } else if (vadEvent === "speech_ended") {
+              const ended = runtimeEvents.end("silence");
+              if (ended) callbackRef.current.onRuntimeEvent?.(ended);
+              const recorded = recorder.finish();
+              if (recorded) transcribe(recorded);
+            } else {
+              const cancelled = runtimeEvents.end("cancelled");
+              if (cancelled) callbackRef.current.onRuntimeEvent?.(cancelled);
+              recorder.cancel();
+            }
+          }
+        },
+        onError: (error) => setMessage(error.message)
+      });
+    } catch (error) {
+      sourceNode.disconnect();
+      void audioContext.close();
+      throw error;
+    }
+
+    if (mixedMode) {
+      publishDirectionalStatus({
+        phase: "voice_only",
+        message: "Local mixed-audio transcription is active; uncertain speakers remain Unknown.",
+        requested: callbackRef.current.twoPartyDirectionalMode === true,
+        channelCount,
+        ownerDirection: null,
+        ownerCalibrationObservations: 0
+      });
+    }
+
+    const close = () => {
+      if (stopped) return;
+      stopped = true;
+      for (const controller of controllers) controller.abort();
+      controllers.clear();
+      const ended = runtimeEvents.end("source_end");
+      if (ended) callbackRef.current.onRuntimeEvent?.(ended);
+      vad.reset();
+      recorder.cancel();
+      frameCapture.stop();
+      sourceNode.disconnect();
+      void audioContext.close();
+    };
+    activeRef.current.push({ close, source: outputSource });
+  }, [classifyMixedTurn, publishDirectionalStatus]);
 
   const createTranscriber = useCallback(
     async (stream: MediaStream, tokenSource: "rep" | "lead", outputSource: AudioSource) => {
@@ -944,12 +1117,33 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
       if (!micStream && !sharedAudioAvailable) {
         throw new Error("Microphone and shared audio permissions were not granted.");
       }
+      const authToken = await callbackRef.current.getAuthToken();
+      const transcriptionStatus = await getTranscriptionRuntimeStatus(
+        callbackRef.current.httpBase,
+        authToken
+      );
+      const useLocalTranscription = transcriptionStatus.local.available;
+      if (
+        !useLocalTranscription &&
+        !transcriptionStatus.cloud.configured
+      ) {
+        throw new Error(
+          "Neither local nor cloud transcription is available. Start the local STT service or configure OpenAI."
+        );
+      }
 
       if (micStream && sharedAudioAvailable && displayStream) {
-        await Promise.all([
-          createTranscriber(micStream, "rep", "rep"),
-          createTranscriber(displayStream, "lead", "lead")
-        ]);
+        if (useLocalTranscription) {
+          await Promise.all([
+            createLocalTranscriber(micStream, "rep"),
+            createLocalTranscriber(displayStream, "lead")
+          ]);
+        } else {
+          await Promise.all([
+            createTranscriber(micStream, "rep", "rep"),
+            createTranscriber(displayStream, "lead", "lead")
+          ]);
+        }
         displayStream.getVideoTracks().forEach((track) => {
           track.addEventListener("ended", () => {
             if (mountedRef.current) {
@@ -959,7 +1153,9 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
           }, { once: true });
         });
         setMode("separated");
-        setMessage("Separated: microphone is you; shared tab/system audio is the other person.");
+        setMessage(
+          `Separated ${useLocalTranscription ? "local" : "cloud"} transcription: microphone is you; shared tab/system audio is the other person.`
+        );
         publishDirectionalStatus({
           ...INITIAL_DIRECTIONAL_STATUS,
           message: "Dedicated microphone and remote tracks are authoritative; direction is not needed."
@@ -970,7 +1166,11 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
       }
 
       if (micStream) {
-        await createTranscriber(micStream, "rep", "unknown");
+        if (useLocalTranscription) {
+          await createLocalTranscriber(micStream, "unknown");
+        } else {
+          await createTranscriber(micStream, "rep", "unknown");
+        }
         setMode("mixed_unverified");
         setMessage(directionalRequested
           ? "Mixed directional mode: verified owner voice calibrates your fixed side; only repeated, strong opposite-side evidence can become Other. Conflicts stay Unknown."
@@ -984,7 +1184,7 @@ export function useSeparatedRealtimeTranscription(options: UseSeparatedRealtimeO
       setMode("error");
       setMessage(error instanceof Error ? error.message : "Could not start audio capture.");
     }
-  }, [beginAutomaticVoiceEnrollment, closeAll, createTranscriber, mode, options.enabled, publishDirectionalStatus, stop]);
+  }, [beginAutomaticVoiceEnrollment, closeAll, createLocalTranscriber, createTranscriber, mode, options.enabled, publishDirectionalStatus, stop]);
 
   useEffect(() => {
     mountedRef.current = true;

@@ -911,9 +911,9 @@ export function App() {
 
       {detailsOpen && <section className="automation-strip" aria-label="Automatic private runtime data">
         <div className={`automation-item ${automation?.apiKey.configured ? "automation-item--ready" : "automation-item--warning"}`}>
-          <span>API key</span>
-          <strong>{automation ? automation.apiKey.configured ? "Loaded at startup" : "Not configured" : "Checking…"}</strong>
-          <small>Server only</small>
+          <span>Coach engine</span>
+          <strong>{automation ? automation.apiKey.configured ? `${automation.apiKey.provider === "local" ? "Local" : "Cloud"} model ready` : "Deterministic fallback" : "Checking…"}</strong>
+          <small>{automation?.apiKey.liveModel ?? "Private runtime"}</small>
         </div>
         <div className="automation-item automation-item--ready">
           <span>Memory</span>
@@ -928,8 +928,8 @@ export function App() {
         </div>
         <div className="automation-item automation-item--ready">
           <span>Transcripts</span>
-          <strong>Capture + delivery learning on</strong>
-          <small>{deliveryObservations.length > 0 ? `${deliveryObservations.length} speaking comparisons this session` : "Learns memory every 6 turns"}</small>
+          <strong>{automation?.transcripts.localAvailable ? "Local GPU path ready" : "Encrypted capture on"}</strong>
+          <small>{automation?.transcripts.localAvailable ? automation.transcripts.localModel : deliveryObservations.length > 0 ? `${deliveryObservations.length} speaking comparisons this session` : "Cloud STT remains optional"}</small>
           <button type="button" onClick={() => setArchiveSearchOpen(true)}>Search archive</button>
         </div>
         <div className={`automation-item ${automation?.google.authorized ? "automation-item--ready" : "automation-item--warning"}`}>
