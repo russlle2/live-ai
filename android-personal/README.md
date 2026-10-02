@@ -91,7 +91,7 @@ For a device with an existing **matching, tested** Vulkan build of `llama-server
 }
 ```
 
-The binary and its companion libraries must belong to the same tested runtime. This setup does not download or prescribe replacement GPU libraries. A preexisting Android aarch64 runtime identified as version 1, commit `a95a11e`, built with Clang 21.1.8 reported an Adreno 840 device; that discovery alone does not establish correct inference or improved latency. Full offload on that runtime failed with a Vulkan device-loss error, including with flash attention disabled. Batch 32 did not complete within 50 seconds. The delivered configuration uses CPU. Enable this configuration only after device quality and latency checks pass. Leave `backend` unset, or set it to `"cpu"`, to use the portable CPU fallback. Configuration remains private and is never committed.
+The binary and its companion libraries must belong to the same tested runtime. This setup does not download or prescribe replacement GPU libraries. A preexisting Android aarch64 runtime identified as version 1, commit `a95a11e`, built with Clang 21.1.8 reported an Adreno 840 device; that discovery alone does not establish correct inference or improved latency. Full offload on that runtime failed with a Vulkan device-loss error, including with flash attention disabled. Batch 32 did not complete within 50 seconds. The delivered configuration uses CPU. Enable this configuration only after device quality and latency checks pass. Leave `backend` unset, or set it to `"cpu"`, to use the portable CPU fallback. Configuration remains private and is never committed. The stock OpenCL backend also returned no available platform after the official vendor-driver setup; that unsuccessful driver package was removed.
 
 ```sh
 rhetoric-start fast
@@ -111,5 +111,7 @@ After the launcher reports Ready, open Live Rhetoric, choose the corresponding e
 node --test assets/tests/core.test.cjs
 python tools/build.py
 ```
+
+A Spanish translation smoke test preserved “cannot before 10 AM” and “this week.” Repeating the identical cached request streamed its first token in 0.18 seconds and finished in 4.13 seconds; this is a cache-hit result, not representative new-conversation latency.
 
 The JavaScript suite checks conversation/request behavior. The build compiles Java/resources, creates DEX, signs the APK, and verifies its signature. These checks do not certify Samsung caption compatibility, microphone behavior during a call, translation accuracy, or model judgment. Verify the installed app on the target phone with a short ordinary utterance, cancelled generation, an imported text sample, and foreground/background transitions before relying on it in a conversation.

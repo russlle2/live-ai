@@ -486,7 +486,7 @@ public class MainActivity extends Activity {
             if (!generation.cancelled) {
                 String message = e.getMessage();
                 if (e instanceof java.net.ConnectException) message = "Local engine is not running on port " + port + ". Start it in Termux.";
-                else if (e instanceof java.net.SocketTimeoutException) message = "The local engine timed out. Use Fast mode or reduce the conversation length.";
+                else if (e instanceof java.net.SocketTimeoutException) message = "The local engine timed out. Try a shorter conversation excerpt.";
                 generationEvent(generation, "error", null, message == null ? "Local engine request failed." : message);
             }
         } finally {
