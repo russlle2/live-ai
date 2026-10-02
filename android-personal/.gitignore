@@ -1,0 +1,6 @@
+build/
+*.apk
+*.jks
+*.keystore
+device-config.json
+*.part

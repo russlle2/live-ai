@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Live Rhetoric</string>
+    <string name="caption_service_name">Live Rhetoric · experimental visible Samsung captions</string>
+    <string name="caption_service_description">Optional, experimental capture of visible caption or transcription text in Samsung call screens. Enable capture inside Live Rhetoric as well. This does not record call audio, identify speakers, or access hidden call transcripts. Compatibility depends on your Samsung software. Captions remain in this running app and are not stored.</string>
+    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">#0B1020</item>
+        <item name="android:navigationBarColor">#0B1020</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:colorAccent">#A8DCCB</item>
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+</resources>
