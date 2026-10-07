@@ -8,6 +8,7 @@ This is a separate, dependency-free Android shell around a bundled interface. It
 
 - Type or paste an utterance; import UTF-8 `.txt`, `.srt`, or `.vtt`; or share text to the app from another app.
 - Request a suggestion grounded in your outcome, acceptable compromise, boundaries, context, and tone. Review it before saying it: a small local model can miss context, invent facts, or produce poor advice.
+- Before a conversation, tap **Prepare guide** after setting your goal and limits. It processes the same instructions in advance and discards its single output token. Preparation has its own status and never creates a suggestion or conversation turn. Starting a real request cancels unfinished preparation.
 - Translate a short utterance. Token-limited results are marked incomplete, never presented as finished translations.
 - Use on-device speech recognition when Android reports an installed compatible recognizer. The app requests microphone permission only when you tap Speak. It never falls back to a cloud recognizer.
 - Optionally repeat recognition while the app is visible. Each native recognition operation handles one utterance. Microphone capture and generation stop when the app goes to the background. Keep the app visible or use supported split-screen mode for active use; neither setup guarantees access to phone-call audio.
@@ -130,9 +131,11 @@ rhetoric-start stop
 
 After the launcher reports Ready, open Live Rhetoric, choose the corresponding engine, enter your desired outcome/compromise/boundaries, and add an utterance. Fallback text is sent to the model only when you select “Allow compromise now.” Choose its speaker before requesting advice. Text, shared transcripts, and imports are the reliable fallback when microphone access or Samsung caption integration is unavailable.
 
+For a lower wait during the conversation, set your direction first, tap **Prepare guide**, and wait for **Prepared** before speaking. The preparation cost happens before the first reply. A phone API test took **6.920 seconds** to prepare, then **2.923 seconds** for the first reply and **4.487 seconds** for a three-turn follow-up. These are a small sample, not installed-app or microphone-to-answer guarantees. Prepare again after changing direction, switching engines, translating, or a long pause. Android may reclaim the model's memory; a successful health check alone does not mean the model's prompt is prepared. The app does not run a background keep-warm loop.
+
 ## Verification
 
-See [VERIFICATION.md](VERIFICATION.md) for the **2026-10-07 UTC** results, artifact status, measured latency, and outstanding device checks. The current working source is **0.1.2**, **unreleased**. The confirmed installed version is **0.1.1**, which added native startup readiness, refreshed microphone availability, fixed failed-start/stop state, rejected oversized captions without retaining current-looking old advice, and closed a foreground-generation race. Source checks do not establish installation of the newer version.
+See [VERIFICATION.md](VERIFICATION.md) for the **2026-10-07 UTC** results, artifact status, measured latency, and outstanding device checks. The current working source is **0.1.3**, a personal test update with an explicit preparation action. The confirmed installed version is **0.1.2**. Source checks do not establish installation of the newer version.
 
 ```sh
 node --test assets/tests/core.test.cjs
@@ -153,5 +156,7 @@ python tools/build.py
 ```
 
 Version **0.1.2** adds clearer setup fields and support for the optional optimized CPU runtime. It retains the **0.1.1 baseline coaching prompt**: tested replacement prompts still violated time constraints or introduced unsupported assumptions, so they were not retained. **Reasoning and conversational-response quality are not fixed by this update.** Goal and hard-limit fields now appear before the optional fallback; the fallback is visibly inactive until authorized. The displayed timer explicitly measures generation, excluding speech recognition. Historical 0.1.1 local API requests took **14–21 seconds**. See [VERIFICATION.md](VERIFICATION.md) for final source-test results, current runtime measurements, and remaining device checks.
+
+Version **0.1.3** keeps the same coaching messages and adds pre-call preparation with prompt reuse explicitly enabled. Preparation preserves the current goal, limits, authorized fallback, and committed history. Its one generated token is discarded by the native shell. Typing, changing direction, clearing the session, backgrounding, and real requests cancel active preparation; stale preparation events cannot replace a suggestion. Preparing does not repair the model's semantic errors or provide access to call audio.
 
 The JavaScript suite checks conversation/request behavior. The build compiles Java/resources, creates DEX, signs the APK, and verifies its signature. These checks do not certify Samsung caption compatibility, microphone behavior during a call, translation accuracy, or model judgment. Verify the installed app on the target phone with a short ordinary utterance, cancelled generation, an imported text sample, and foreground/background transitions before relying on it in a conversation.

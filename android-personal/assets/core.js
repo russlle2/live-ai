@@ -22,6 +22,9 @@
     return {requestId,port:p.port,messages:[{role:'system',content:system},{role:'user',content:JSON.stringify(data)}],max_tokens:64,temperature:0.45,chat_template_kwargs:{enable_thinking:false}};
   }
 
+  function preparationPayload(profile, turns, requestId) {
+    return {...coachPayload(profile,turns,requestId),max_tokens:1};
+  }
   function translationPayload(profile, text, requestId) {
     const p=settings(profile);
     if(String(text||'').trim().length>300)return null;
@@ -77,5 +80,5 @@
     }
     clear() { const id=this.invalidate();this.turns=[];this.draft=null;this.result=null;return id; }
   }
-  return {defaults,settings,clean,recentTurns,coachPayload,translationPayload,readableOutput,isEcho,Session};
+  return {defaults,settings,clean,recentTurns,coachPayload,preparationPayload,translationPayload,readableOutput,isEcho,Session};
 });

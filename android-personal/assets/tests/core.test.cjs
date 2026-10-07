@@ -97,6 +97,21 @@ test('Fallback enters model context only after explicit authorization',()=>{
   assert.equal(C.settings({}).allowCompromise,false);
 });
 
+test('Preparation preserves the real coaching prefix and does not create a session result',()=>{
+  const profile={goal:'Ask for an evening appointment',boundaries:'No time before 6 PM',compromise:'A morning slot',allowCompromise:false};
+  const session=new C.Session(profile);
+  session.stage('Could we book 4 PM?','typed','other');session.commit('other');
+  const before=JSON.stringify(session);
+  const prepared=C.preparationPayload(profile,session.turns,'warm');
+  const request=C.coachPayload(profile,session.turns,'real');
+  assert.deepEqual(prepared.messages,request.messages);
+  assert.equal(prepared.max_tokens,1);
+  assert.equal(prepared.messages.some(m=>m.content.includes('A morning slot')),false);
+  assert.equal(JSON.stringify(session),before);
+  assert.equal(session.active,null);
+  assert.equal(session.result,null);
+});
+
 test('Evaluation cases preserve authorized facts, limits, and multi-turn agreement data',()=>{
   const fixture=require('./coach-eval-cases.json');
   assert.equal(fixture.cases.length,5);

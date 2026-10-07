@@ -1,6 +1,6 @@
 # Verification — 2026-10-07 UTC
 
-**Verdict:** the installed **0.1.1** APK has passed build, signature, and installation checks. A reviewed user recording demonstrates native result display but reveals a **24.6-second** generation and an unsuitable scheduling suggestion. A private optimized CPU engine is now running on the phone: the original prompt completed in **10.705 seconds** at the API. This is faster, but still does not meet the intended fluid live-conversation experience. Microphone capture, actual call-caption compatibility, final installed-update behavior, and broader model judgment remain unverified. Translation quality passed only partially. Version **0.1.2** remains a personal test build, not a verified hands-free, live in-call guide.
+**Verdict:** installed **0.1.2** is verified by package metadata and exact APK hash. The optimized CPU engine is ready. A new **0.1.3** preparation control moves unchanged-prompt processing before a conversation: phone API tests measured **6.920 s** of preparation, followed by **2.923 s** for a first reply and **4.487 s** for a real follow-up turn. These are narrow API measurements, not installed-0.1.3 or microphone-to-answer timings. Model judgment remains unresolved, translation quality passed only partially, and actual call-caption compatibility is unverified. This remains a personal test build, not a verified hands-free, live in-call guide.
 
 ## Artifacts and test scope
 
@@ -78,7 +78,7 @@ The scheduling result retains the requested after-6-PM time, but introduces “r
 | 0.1.2 artifact | **74,848 bytes**; SHA-256 `a6f905e4e494b804bc2e488f8137c23421654a4a9bcec0f219ba84d388e334c4`; package `com.christopherlake.liverhetoric`, version **0.1.2**, code **3**. |
 | 0.1.2 bundled assets | **Pass**: extracted `core.js` SHA-256 `3cabc173ef7ce4f22f56772130e40ec148b54f6892bb96037183933ae6a81d0f` matches the retained 0.1.1 core exactly. New hard-limit field wording and Generation timer label are present. |
 | 0.1.2 delivery | Copied to phone Downloads as **Live-Rhetoric-0.1.2.apk**, also available as **Live-Rhetoric-personal.apk**. Personal test update only. |
-| 0.1.2 installation and native retest | **Pending user installer action and device retest**. Build/signature/API checks are not evidence that this APK is installed. |
+| 0.1.2 installation | **Pass**: after the user's update, package metadata confirms version 0.1.2/code3 and installed APK SHA-256 matches `a6f905e4e494b804bc2e488f8137c23421654a4a9bcec0f219ba84d388e334c4`. User reports all needed permissions granted. This does not independently establish call-time capture behavior. |
 
 ## Optimized CPU runtime and prompt evaluation
 
@@ -96,13 +96,43 @@ A fourth and final candidate placed quoted conversation before current direction
 
 The five saved cases in `assets/tests/coach-eval-cases.json` are reusable quality rubrics covering a new proposal, an explicit hard time limit, a relationship complaint, a charge dispute, and changing an existing agreement. They are not a claim that this model passes all five. Hard boundaries and goal adherence remain model instructions, not semantic guarantees enforced by code. Prompt tuning alone did not establish acceptable general conversation judgment on the current 4B model.
 
+## 0.1.3 preparation and cache measurements
+
+A later device inspection found the Termux engine assigned to `cpu:/background` and `cpuset:/moderate`, with allowed CPUs **0,1,4,5**. Its resident memory was approximately **4 MiB**, while **2.67 GiB** was swapped. After inference it had approximately **2.40 GiB resident** and **287 MiB swapped**. The device had about **2.92 GiB available RAM** and **10.91 GiB of 12 GiB swap used** at the earlier inspection. These observations show background scheduling and substantial memory reclamation; they do not isolate their contributions to latency. Microphone/files permissions do not change the prompt tokens the model must process.
+
+The active llama.cpp slot already reuses a matching prompt prefix by default. The launcher's `--cache-ram 0` does not disable that live-slot reuse. The earlier uncached tests intentionally excluded it. Fresh requests using unchanged coaching instructions produced:
+
+| Sequence / request | First token | Total | Prompt tokens | Cached tokens | Output tokens |
+|---|---:|---:|---:|---:|---:|
+| First request after idle | 7.822 s | 8.936 s | 197 | 3 | 14 |
+| Different utterance, same direction | 0.474 s | 1.861 s | 200 | 184 | 17 |
+| Separate test: prepare empty history, cache reuse disabled | 6.920 s | 6.920 s | 186 | 0 | 1, discarded |
+| First actual utterance after preparation | 1.261 s | 2.923 s | 207 | 179 | 14 |
+| Follow-up with three actual conversation turns | 2.255 s | 4.487 s | 248 | 200 | 18 |
+
+The preparation sequence uses an explicit hard limit against calls at or before 6 PM. Its first actual reply was “How about we schedule the call tomorrow after 6 PM instead?” The follow-up responded to a proposed 7-PM time with “Yes, I'm available tomorrow after 6 PM—how about 7 PM?” The latter is redundant and phrases the user's goal as availability; these timings are not a reasoning-quality pass. The different-utterance timing test also reused “reschedule” without a confirmed appointment. Speed and semantic correctness remain separate gates.
+
+Requests use the same selected model, four CPU threads, batch/microbatch 128, and seed 42 for comparability. Cache reuse was enabled except for the explicitly uncached preparation row. The model/file pages may already have been resident during preparation. This is a small sample with differing prompt/output lengths, not a latency guarantee or a controlled claim that all replies take under three seconds. Preparation moves work before the conversation; it does not eliminate that work. Reclaiming memory, changing profile fields, switching models, translating, and longer/new conversation prefixes can reduce reuse.
+
+Version 0.1.3 adds an explicit **Prepare guide** action. It sends the same coaching payload with current committed history, allows a single generated token, and discards all preparation output. It never adds that output to conversation history or displays it as advice. Real generation has priority; preparation uses the same foreground checks, local-port restrictions, request bounds, and cancellation path. There is no background warming loop or automatic microphone activation.
+
+The preparation result is a status for completed setup, not proof that Android will retain the cache indefinitely. Ordinary new utterances and coaching preserve that completed status; changing direction, switching engines, translating, clearing, or backgrounding invalidates it. Active preparation is cancelled when real input/work arrives. Independent source review checked atomic request replacement so stale preparation cannot cancel or clear a newer real request.
+
+| 0.1.3 validation | Status |
+|---|---|
+| Core tests | **13 passed**, including unchanged coaching messages and no session mutation from preparation. |
+| Browser regressions | **14 groups passed**, including preparation isolation, preserved Prepared status across ordinary turns, cancellation/timeout, late-event rejection, and real-request priority. Native bridge is simulated. |
+| Phone inference | **Pass for preparation/cache operation**, timings above. Does not establish general response quality. |
+| APK build/signature/assets | **Pending**: the final source archive transfer and a subsequent REPL connectivity probe stopped responding, although device inventory still reports Online. Neither request returned a successful completion. No 0.1.3 phone build was started, and no 0.1.3 APK is claimed as delivered. Resume after the phone connection responds; verify any partially completed transfer before building. |
+| Installation and native preparation retest | Pending user installer action and device retest. |
+
 ## Remaining readiness gates
 
 1. Improve and evaluate model judgment across the saved cases, including updated goals, factual restraint, and strict time constraints. Reject a candidate that fixes one example while breaking another. A more capable local model/runtime or a separately validated constraint-checking stage may be required; neither has been established here.
 2. Directly exercise microphone permission, installed on-device recognizer/language support, speech results, cancellation, and foreground/background transitions in the actual app. The user's matching transcript is useful evidence but does not show that full sequence. Test call-time microphone behavior separately.
 3. Verify that this phone's Samsung caption view exposes supported text fields during an actual call. Accessibility service connection alone does not establish compatibility.
 4. Keep the guide visible, or use a supported split-screen arrangement, and manually identify the speaker. The current app stops microphone capture and generation in the background and has no automatic speaker identification or background guidance overlay.
-5. Measure end-to-end latency and output quality in the real interaction after the unreleased changes. The native recording proves result display and reveals a poor 24.6-second generation experience; API smoke tests and simulated-browser tests do not establish microphone-to-suggestion performance. The measured 10.705-second generation still leaves a substantial latency gap.
+5. Measure end-to-end latency and output quality in the real interaction after the update. The native recording proves result display and reveals a poor 24.6-second generation experience; the new preparation/cache API tests show a shorter reply wait but do not establish microphone-to-suggestion performance or sustained live-call latency.
 
 ## Reproduce source checks
 

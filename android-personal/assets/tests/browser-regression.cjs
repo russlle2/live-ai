@@ -18,9 +18,9 @@ const {chromium}=require('playwright');
       window.Native={
         loadSettings:()=>JSON.stringify({continuous:true}),
         saveSettings:s=>calls.push(['save',JSON.parse(s)]),
-        capabilities:()=>JSON.stringify({speechAvailable:window.speechAvailable}),
+        capabilities:()=>JSON.stringify({speechAvailable:window.speechAvailable,preparationAvailable:opts.preparationAvailable!==false}),
         checkEngine:port=>{calls.push(['check',port]);if(!nativeReady){dropped++;return;}if(!holdEngine)queueMicrotask(()=>NativeEvent({type:'engine',port,ready:true,model:'Test engine'}));},
-        generate:s=>calls.push(['generate',JSON.parse(s)]),cancelGeneration:()=>calls.push(['cancel']),
+        generate:s=>calls.push(['generate',JSON.parse(s)]),prepareGuide:s=>calls.push(['prepare',JSON.parse(s)]),cancelGeneration:()=>calls.push(['cancel']),
         startListening:()=>calls.push(['listen']),stopListening:()=>calls.push(['stop']),
         copyText:()=>{},setCaptionCapture:()=>{},openCaptionSettings:()=>{},importText:()=>{}
       };
@@ -124,6 +124,82 @@ const {chromium}=require('playwright');
     await changed.locator('#micButton').click();assert.equal(await changed.evaluate(()=>calls.filter(c=>c[0]==='listen').length),1);
     assert.deepEqual(changedErrors,[]);
     console.log('PASS microphone preflight: failed starts clear flags; newly available speech works without reload; resume refresh sees removal.');
+
+    const {page:prep,errors:prepErrors}=await setup();
+    assert.equal(await prep.locator('#prepareGuide').isDisabled(),true);
+    await prep.evaluate(()=>deliverReady());
+    assert.equal(await prep.evaluate(()=>calls.filter(c=>c[0]==='prepare').length),0);
+    const originalAnswer=await prep.locator('#answerText').textContent();
+    await prep.locator('#prepareGuide').click();
+    let warm=await prep.evaluate(()=>calls.filter(c=>c[0]==='prepare').at(-1)[1]);
+    assert.equal(warm.max_tokens,1);
+    assert.equal(await prep.locator('#prepareGuide').textContent(),'Stop preparation');
+    await prep.evaluate(id=>NativeEvent({type:'preparation',requestId:id,phase:'done',elapsedMs:5200,finish_reason:'length',text:'This text must never become advice.'}),warm.requestId);
+    assert.equal(await prep.locator('#preparationStatus').textContent(),'Prepared · 5.2 sec');
+    assert.equal(await prep.locator('#answerText').textContent(),originalAnswer);
+    assert.equal(await prep.locator('.turn').count(),0);
+    assert.equal(await prep.evaluate(()=>calls.filter(c=>['listen','generate'].includes(c[0])).length),0);
+    console.log('PASS explicit preparation: no automatic warm-up, microphone, suggestion, or transcript turn; one-token completion updates only preparation status.');
+
+    await prep.locator('#utterance').fill('Can you talk tomorrow?');
+    assert.equal(await prep.locator('#preparationStatus').textContent(),'Prepared · 5.2 sec');
+    await prep.locator('[data-speaker=other]').click();await prep.locator('#addTurn').click();
+    assert.equal(await prep.locator('#preparationStatus').textContent(),'Prepared · 5.2 sec');
+    assert.equal(await prep.locator('#prepareGuide').isDisabled(),true);
+    let actual=await prep.evaluate(()=>calls.filter(c=>c[0]==='generate').at(-1)[1]);
+    await prep.evaluate(id=>NativeEvent({type:'generation',requestId:id,phase:'done',text:'Would tomorrow evening work for you?',elapsedMs:8300}),actual.requestId);
+    const priorAnswer=await prep.locator('#answerText').textContent();const priorTurns=await prep.locator('.turn').count();
+    await prep.locator('#prepareGuide').click();warm=await prep.evaluate(()=>calls.filter(c=>c[0]==='prepare').at(-1)[1]);
+    await prep.evaluate(id=>NativeEvent({type:'preparation',requestId:id,phase:'done',elapsedMs:1000}),warm.requestId);
+    assert.equal(await prep.locator('#answerText').textContent(),priorAnswer);assert.equal(await prep.locator('.turn').count(),priorTurns);assert.equal(await prep.locator('#copyAnswer').isDisabled(),false);
+    await prep.locator('#goal').fill('Arrange a convenient evening.');
+    assert.equal(await prep.locator('#preparationStatus').textContent(),'Prepare before a call');
+    await prep.locator('#prepareGuide').click();warm=await prep.evaluate(()=>calls.filter(c=>c[0]==='prepare').at(-1)[1]);
+    await prep.locator('#goal').fill('Find an evening that works for both of us.');
+    await prep.evaluate(id=>NativeEvent({type:'preparation',requestId:id,phase:'done',elapsedMs:1000}),warm.requestId);
+    assert.equal(await prep.locator('#preparationStatus').textContent(),'Prepare before a call');
+    assert.equal(await prep.locator('#prepareGuide').textContent(),'Prepare guide');
+    console.log('PASS preparation isolation: valid answer/history and completed preparation survive ordinary turns; profile changes clear preparation and late completion cannot restore Prepared.');
+
+    const priorityStart=await prep.evaluate(()=>calls.length);await prep.locator('#prepareGuide').click();
+    warm=await prep.evaluate(()=>calls.filter(c=>c[0]==='prepare').at(-1)[1]);await prep.locator('#coachButton').click();
+    assert.deepEqual(await prep.evaluate(n=>calls.slice(n).map(c=>c[0]),priorityStart),['prepare','cancel','generate']);
+    assert.equal(await prep.locator('#prepareGuide').isDisabled(),true);
+    const beforeLateEvent=await prep.evaluate(()=>calls.length);
+    await prep.evaluate(id=>NativeEvent({type:'preparation',requestId:id,phase:'done',elapsedMs:2000}),warm.requestId);
+    await prep.evaluate(id=>NativeEvent({type:'preparation',requestId:id,phase:'error',message:'Old preparation failed.'}),warm.requestId);
+    assert.equal(await prep.evaluate(()=>calls.length),beforeLateEvent);
+    assert.equal(await prep.locator('#coachButton span').first().textContent(),'Stop generating');
+    assert.equal(await prep.locator('#preparationStatus').textContent(),'Prepare before a call');
+    actual=await prep.evaluate(()=>calls.filter(c=>c[0]==='generate').at(-1)[1]);
+    await prep.evaluate(id=>NativeEvent({type:'generation',requestId:id,phase:'done',text:'Which evening works best for you?'}),actual.requestId);
+    console.log('PASS preparation priority: ordinary generation cancels preparation first; stale preparation completion cannot change the real reply.');
+
+    await prep.locator('#prepareGuide').click();warm=await prep.evaluate(()=>calls.filter(c=>c[0]==='prepare').at(-1)[1]);
+    await prep.clock.fastForward(90050);assert.equal(await prep.locator('#preparationStatus').textContent(),'Preparation timed out');
+    await prep.evaluate(id=>NativeEvent({type:'preparation',requestId:id,phase:'done',elapsedMs:90051}),warm.requestId);
+    assert.equal(await prep.locator('#preparationStatus').textContent(),'Preparation timed out');
+    await prep.locator('#prepareGuide').click();await prep.locator('#prepareGuide').click();assert.equal(await prep.locator('#preparationStatus').textContent(),'Preparation cancelled');
+    await prep.locator('#prepareGuide').click();warm=await prep.evaluate(()=>calls.filter(c=>c[0]==='prepare').at(-1)[1]);
+    await prep.evaluate(()=>{Object.defineProperty(document,'visibilityState',{configurable:true,value:'hidden'});document.dispatchEvent(new Event('visibilitychange'));});
+    assert.equal(await prep.locator('#preparationStatus').textContent(),'Preparation cancelled');
+    await prep.evaluate(id=>NativeEvent({type:'preparation',requestId:id,phase:'done',elapsedMs:1500}),warm.requestId);
+    assert.equal(await prep.locator('#preparationStatus').textContent(),'Preparation cancelled');
+    await prep.evaluate(()=>{Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});document.dispatchEvent(new Event('visibilitychange'));});
+    await prep.locator('#prepareGuide').click();await prep.locator('#utterance').fill('A new uncommitted utterance.');assert.equal(await prep.locator('#preparationStatus').textContent(),'Prepare before a call');
+    await prep.locator('#prepareGuide').click();warm=await prep.evaluate(()=>calls.filter(c=>c[0]==='prepare').at(-1)[1]);
+    await prep.evaluate(id=>NativeEvent({type:'preparation',requestId:id,phase:'done',elapsedMs:1000}),warm.requestId);
+    await prep.locator('#translateButton').click();assert.equal(await prep.locator('#preparationStatus').textContent(),'Prepare before a call');
+    actual=await prep.evaluate(()=>calls.filter(c=>c[0]==='generate').at(-1)[1]);
+    await prep.evaluate(id=>NativeEvent({type:'generation',requestId:id,phase:'done',text:'A translated utterance.'}),actual.requestId);
+    await prep.locator('#prepareGuide').click();await prep.locator('#clearSession').click();assert.equal(await prep.locator('#preparationStatus').textContent(),'Prepare before a call');
+    assert.deepEqual(prepErrors,[]);
+    console.log('PASS preparation lifecycle: timeout, second-tap stop, typing, translation, background, and clear cancel work; late completion stays ignored.');
+
+    const {page:unsupported}=await setup({preparationAvailable:false});await unsupported.evaluate(()=>deliverReady());
+    assert.equal(await unsupported.locator('#prepareGuide').isDisabled(),true);
+    assert.equal(await unsupported.evaluate(()=>calls.filter(c=>c[0]==='prepare').length),0);
+    console.log('PASS preparation capability: unsupported native apps cannot start preparation.');
     console.log('All browser regressions passed. Native bridge was simulated; installed APK, microphone hardware, Samsung captions and model quality were not tested.');
   }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

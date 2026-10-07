@@ -11,6 +11,7 @@
 <div class="app-shell">
   <header class="app-header"><div class="brand"><span class="brand-mark" aria-hidden="true"><i></i></span><div><strong>LIVE RHETORIC</strong><span>Your words. Your direction.</span></div></div><button class="icon-button" id="settingsOpen" aria-label="Open app settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6M16 14v6"/></svg></button></header>
   <div class="connection-row"><span class="status-pill" id="connection"><i></i><span id="connectionText">Checking local engine</span></span><span class="device-label" id="deviceLabel">ON THIS PHONE</span></div>
+  <div class="prepare-panel"><div class="prepare-row"><button id="prepareGuide" class="secondary-button" aria-describedby="prepareHelp" disabled>Prepare guide</button><span id="preparationStatus" role="status" aria-live="polite">Prepare before a call</span></div><p id="prepareHelp">Prepare after changing your goal or a long pause. First reply can still vary.</p></div>
   <div id="previewNotice" class="notice" hidden>Layout preview · connect the Android app to use your local model and microphone.</div>
   <div id="engineNotice" class="engine-notice" hidden><div><strong>Start your local model in Termux</strong><code id="engineCommand">rhetoric-start fast</code></div><button class="text-button" id="copyCommand">Copy command</button></div>
   <main>

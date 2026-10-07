@@ -173,7 +173,7 @@ public class MainActivity extends Activity {
 
     private void emitReady() {
         JSONObject object = event("ready");
-        put(object, "version", "0.1.2");
+        put(object, "version", "0.1.3");
         emit(object);
     }
 
@@ -203,7 +203,8 @@ public class MainActivity extends Activity {
             JSONObject object = new JSONObject();
             put(object, "speechAvailable", speechAvailable());
             put(object, "sdk", Build.VERSION.SDK_INT);
-            put(object, "version", "0.1.2");
+            put(object, "version", "0.1.3");
+            put(object, "preparationAvailable", true);
             put(object, "captionExperimental", true);
             put(object, "captionServiceEnabled", CaptionAccessibilityService.isConnected());
             return object.toString();
@@ -213,7 +214,8 @@ public class MainActivity extends Activity {
             runOnUiThread(new Runnable() { @Override public void run() { beginSpeech(selected); }});
         }
         @JavascriptInterface public void stopListening() { runOnUiThread(new Runnable() { @Override public void run() { stopSpeech(true); }}); }
-        @JavascriptInterface public void generate(String payloadJson) { queueGeneration(payloadJson); }
+        @JavascriptInterface public void generate(String payloadJson) { queueGeneration(payloadJson, false); }
+        @JavascriptInterface public void prepareGuide(String payloadJson) { queueGeneration(payloadJson, true); }
         @JavascriptInterface public void cancelGeneration() { cancelCurrent(); }
         @JavascriptInterface public void checkEngine(int port) { queueEngineCheck(port); }
         @JavascriptInterface public void importText() {
@@ -373,26 +375,31 @@ public class MainActivity extends Activity {
 
     private static final class Generation {
         final String requestId;
+        final boolean preparation;
         final long startedAt = android.os.SystemClock.elapsedRealtime();
         final AtomicBoolean ended = new AtomicBoolean(false);
         volatile boolean cancelled;
         volatile boolean truncated;
         volatile String finishReason = "";
         volatile HttpURLConnection connection;
-        Generation(String requestId) { this.requestId = requestId; }
+        Generation(String requestId, boolean preparation) {
+            this.requestId = requestId;
+            this.preparation = preparation;
+        }
     }
 
     private void generationEvent(Generation generation, String phase, String text, String message) {
+        if (generation.preparation && phase.equals("delta")) return;
         boolean terminal = phase.equals("done") || phase.equals("error") || phase.equals("cancelled");
         if (terminal && !generation.ended.compareAndSet(false, true)) return;
         if (!terminal && generation.ended.get()) return;
-        JSONObject object = event("generation");
+        JSONObject object = event(generation.preparation ? "preparation" : "generation");
         put(object, "requestId", generation.requestId); put(object, "phase", phase);
         put(object, "elapsedMs", android.os.SystemClock.elapsedRealtime() - generation.startedAt);
-        if (text != null) put(object, "text", text);
+        if (!generation.preparation && text != null) put(object, "text", text);
         if (message != null) put(object, "message", message);
         if (phase.equals("done")) {
-            put(object, "truncated", generation.truncated);
+            if (!generation.preparation) put(object, "truncated", generation.truncated);
             put(object, "finish_reason", generation.finishReason);
         }
         emit(object);
@@ -405,13 +412,17 @@ public class MainActivity extends Activity {
             activeGeneration = null;
             if (current != null) current.cancelled = true;
         }
+        finishCancellation(current);
+    }
+
+    private void finishCancellation(Generation current) {
         if (current != null) {
             if (current.connection != null) current.connection.disconnect();
-            generationEvent(current, "cancelled", null, "Generation cancelled.");
+            generationEvent(current, "cancelled", null, current.preparation ? "Preparation cancelled." : "Generation cancelled.");
         }
     }
 
-    private void queueGeneration(String raw) {
+    private void queueGeneration(String raw, boolean preparation) {
         String requestId = "invalid";
         try {
             if (raw == null || raw.length() > PAYLOAD_LIMIT) throw new Exception("Request is too large.");
@@ -436,25 +447,34 @@ public class MainActivity extends Activity {
             }
             JSONObject body = new JSONObject();
             body.put("messages", safeMessages); body.put("stream", true);
-            body.put("max_tokens", Math.max(16, Math.min(512, input.optInt("max_tokens", 180))));
+            body.put("max_tokens", preparation ? 1 : Math.max(16, Math.min(512, input.optInt("max_tokens", 180))));
+            body.put("cache_prompt", true);
             body.put("temperature", Math.max(0.0, Math.min(1.5, input.optDouble("temperature", 0.5))));
             body.put("chat_template_kwargs", new JSONObject().put("enable_thinking", false));
-            final Generation generation = new Generation(requestId);
-            cancelCurrent();
+            final Generation generation = new Generation(requestId, preparation);
+            Generation previous;
             synchronized (generationLock) {
                 if (destroyed || !foreground) throw new Exception("Open Live Rhetoric to generate a suggestion.");
+                if (preparation && activeGeneration != null && !activeGeneration.preparation && !activeGeneration.ended.get()) {
+                    throw new Exception("Wait for the current suggestion before preparing the guide.");
+                }
+                previous = activeGeneration;
+                if (previous != null) previous.cancelled = true;
                 activeGeneration = generation;
             }
+            finishCancellation(previous);
             inferenceWorker.execute(new Runnable() { @Override public void run() { runGeneration(generation, port, body); }});
         } catch (Exception e) {
-            generationEvent(new Generation(requestId), "error", null, e.getMessage() == null ? "Invalid generation request." : e.getMessage());
+            generationEvent(new Generation(requestId, preparation), "error", null,
+                e.getMessage() == null ? (preparation ? "Invalid preparation request." : "Invalid generation request.") : e.getMessage());
         }
     }
 
     private void runGeneration(Generation generation, int port, JSONObject body) {
         if (generation.cancelled || destroyed) return;
         HttpURLConnection connection = null;
-        StringBuilder full = new StringBuilder();
+        StringBuilder full = generation.preparation ? null : new StringBuilder();
+        int responseCharacters = 0;
         try {
             generationEvent(generation, "start", "", null);
             connection = connection(port, "/v1/chat/completions");
@@ -485,9 +505,12 @@ public class MainActivity extends Activity {
                     if (delta != null && !delta.isNull("content")) {
                         String text = delta.optString("content", "");
                         if (!text.isEmpty()) {
-                            full.append(text);
-                            if (full.length() > PAYLOAD_LIMIT) throw new Exception("Local response exceeded the size limit.");
-                            generationEvent(generation, "delta", text, null);
+                            responseCharacters += text.length();
+                            if (responseCharacters > PAYLOAD_LIMIT) throw new Exception("Local response exceeded the size limit.");
+                            if (!generation.preparation) {
+                                full.append(text);
+                                generationEvent(generation, "delta", text, null);
+                            }
                         }
                     }
                     if (!choice.isNull("finish_reason") && !choice.optString("finish_reason").isEmpty()) {
@@ -498,7 +521,8 @@ public class MainActivity extends Activity {
                 }
                 if (!generation.cancelled) {
                     if (!completed) throw new Exception("The local engine stream ended before completion.");
-                    generationEvent(generation, "done", full.toString(), generation.truncated
+                    if (generation.preparation) generationEvent(generation, "done", null, "Preparation complete.");
+                    else generationEvent(generation, "done", full.toString(), generation.truncated
                         ? "Response reached its token limit and may be incomplete. Use a shorter utterance or generate again."
                         : null);
                 }
