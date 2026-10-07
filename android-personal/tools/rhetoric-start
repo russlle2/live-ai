@@ -1,0 +1,157 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""Start one phone-local llama.cpp engine. Never run arbitrary received commands."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import signal
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+
+STATE = Path.home() / ".local/state/live-rhetoric"
+CONFIG = Path.home() / ".config/live-rhetoric/models.json"
+try:
+    config = json.loads(CONFIG.read_text()) if CONFIG.is_file() else {}
+except (OSError, ValueError):
+    raise SystemExit("Cannot read model configuration: " + str(CONFIG))
+if not isinstance(config, dict):
+    raise SystemExit("Model configuration must be a JSON object: " + str(CONFIG))
+BACKEND = config.get("backend", "cpu")
+if BACKEND not in ("cpu", "vulkan"):
+    raise SystemExit("Configured backend must be cpu or vulkan.")
+MODELS = {
+    "fast": (Path.home() / "models/live-rhetoric/Qwen3-4B-Instruct-2507-Q4_K_M.gguf", 8081, "rhetoric-fast"),
+    "custom": (Path(config.get("custom_model", str(Path.home() / "models/custom.gguf"))).expanduser(), 8080, "genesis"),
+}
+
+
+def ready(state):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:" + str(state["port"]) + "/health", timeout=2) as response:
+            return json.load(response).get("status") == "ok"
+    except (OSError, ValueError):
+        return False
+
+
+def identity(pid):
+    try:
+        text = Path("/proc") / str(pid)
+        fields = (text / "stat").read_text().rsplit(")", 1)[1].split()
+        return fields[19], (text / "cmdline").read_bytes()
+    except (OSError, IndexError):
+        return None, b""
+
+
+def owned_state():
+    try:
+        state = json.loads((STATE / "server.json").read_text())
+        tick, command = identity(state["pid"])
+        expected_executable = state.get("executable")
+        executable_matches = command.split(b"\0", 1)[0] == expected_executable.encode() if expected_executable else b"llama-server" in command
+        if tick == state["start_tick"] and executable_matches and state["model"].encode() in command:
+            return state
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
+
+
+def stop(state):
+    if state:
+        os.kill(state["pid"], signal.SIGINT)
+        for _ in range(60):
+            if not owned_state():
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit("Engine is still stopping. Try again in a moment.")
+    (STATE / "server.json").unlink(missing_ok=True)
+
+
+def runtime():
+    environment = os.environ.copy()
+    executable = "llama-server"
+    if BACKEND == "cpu" and config.get("cpu_binary"):
+        executable = str(Path(config["cpu_binary"]).expanduser().resolve())
+        if not Path(executable).is_file() or not os.access(executable, os.X_OK):
+            raise SystemExit("Configured CPU engine is missing or not executable. Remove cpu_binary to use Termux's engine.")
+    elif BACKEND == "cpu" and not shutil.which(executable):
+        raise SystemExit("Termux's llama-server is missing. Install llama-cpp or select a tested cpu_binary; the running engine was left alone.")
+    if BACKEND == "vulkan":
+        executable = str(Path(config.get("vulkan_binary", str(Path.home() / "llama-server-vulkan"))).expanduser())
+        library_dir = Path(config.get("vulkan_libraries", str(Path.home() / "llama-vulkan-libs"))).expanduser()
+        if not Path(executable).is_file() or not (library_dir / "libggml-vulkan.so").is_file():
+            raise SystemExit("Configured Vulkan runtime is missing. Set backend to cpu or provide the matching binary and libraries.")
+        environment["LD_LIBRARY_PATH"] = str(library_dir) + ":" + environment.get("LD_LIBRARY_PATH", "")
+    return executable, environment
+
+
+def main():
+    mode = sys.argv[1] if len(sys.argv) > 1 else "fast"
+    STATE.mkdir(parents=True, exist_ok=True)
+    STATE.chmod(0o700)
+    state = owned_state()
+    if mode == "status":
+        print(("Ready: " if ready(state) else "Loading or unavailable: ") + state["mode"] + " on port " + str(state["port"]) if state else "Stopped")
+        return
+    if mode == "stop":
+        stop(state)
+        print("Local engine stopped.")
+        return
+    if mode not in MODELS:
+        raise SystemExit("Use: rhetoric-start [fast|custom|status|stop]")
+    executable, environment = runtime()
+    if state and state["mode"] == mode and state["model"] == str(MODELS[mode][0]) and state.get("backend", "cpu") == BACKEND and state.get("executable") == executable:
+        print("Engine is ready. Open Live Rhetoric." if ready(state) else "Engine is still loading. Check rhetoric-start status.")
+        return
+    path, port, alias = MODELS[mode]
+    if not path.is_file():
+        raise SystemExit("Model not found: " + str(path))
+    stop(state)
+    lock_path = Path.home() / ".cache/genesis-model.lock"
+    lock_path.parent.mkdir(exist_ok=True)
+    lock = lock_path.open("a")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit("Genesis is already running. Exit its chat/server, then try again.")
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
+            raise SystemExit("Port is already in use; leaving that service alone: " + str(port))
+    args = [executable, "-m", str(path), "--alias", alias, "--host", "127.0.0.1", "--port", str(port),
+            "-c", "2048", "-t", "4", "-tb", "4", "-b", "128", "-ub", "128", "--device", "Vulkan0" if BACKEND == "vulkan" else "none",
+            "-ngl", "99" if BACKEND == "vulkan" else "0", "--parallel", "1", "--cache-ram", "0", "--jinja", "--no-webui", "-n", "128"]
+    if mode == "fast":
+        args += ["--reasoning", "off", "--temp", "0.7", "--top-p", "0.8",
+                 "--top-k", "20", "--min-p", "0"]
+    if BACKEND == "vulkan":
+        args += ["-fa", "off", "-b", "32", "-ub", "32"]
+    with (STATE / "engine.log").open("w") as log:
+        process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                   start_new_session=True, pass_fds=(lock.fileno(),), env=environment)
+    tick, _ = identity(process.pid)
+    record = {"pid": process.pid, "start_tick": tick, "model": str(path), "mode": mode, "port": port, "backend": BACKEND, "executable": executable}
+    (STATE / "server.json").write_text(json.dumps(record))
+    (STATE / "server.json").chmod(0o600)
+    print("Loading " + mode + " model...", flush=True)
+    for _ in range(90):
+        if process.poll() is not None:
+            raise SystemExit("Engine failed; see " + str(STATE / "engine.log"))
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:" + str(port) + "/health", timeout=1) as response:
+                if json.load(response).get("status") == "ok":
+                    print("Ready. Open Live Rhetoric and choose " + ("Local guide" if mode == "fast" else "Custom Genesis") + ".")
+                    print("Stop later with: rhetoric-start stop")
+                    return
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.5)
+    raise SystemExit("Still loading. Check again with rhetoric-start status.")
+
+
+if __name__ == "__main__":
+    main()

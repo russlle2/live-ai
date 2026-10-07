@@ -1,5 +1,7 @@
 # Live Rhetoric
 
+For the phone-only, local-model Android app, see [`android-personal`](./android-personal/README.md). It adds an offline interface, on-device speech input, translation, explicit speaker review, and an experimental Samsung caption bridge. The original web application remains below.
+
 Live Rhetoric is a private, single-owner, real-time communication aide. It listens through separately captured audio channels and gives the owner a short, directly speakable next line for:
 
 - job interviews;

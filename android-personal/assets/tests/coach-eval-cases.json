@@ -1,0 +1,139 @@
+{
+  "purpose": "Synthetic coaching quality and latency comparison; evaluate criteria, not exact reply strings. Unit tests do not establish model quality.",
+  "sharedCriteria": [
+    "Reply from the user's perspective to the latest other-person turn.",
+    "At most two brief sentences and approximately 25 words, with no labels or explanation.",
+    "Advance the stated goal without turning a preference into an invented fact, promise, or commitment.",
+    "Respect explicit limits and make no unauthorized concession.",
+    "Use natural wording that fits the actual conversation rather than merely repeating a goal or counterpart's line."
+  ],
+  "cases": [
+    {
+      "id": "recording_proposal_disabled_fallback",
+      "profile": {
+        "goal": "Arrange a call tomorrow after 6 PM",
+        "compromise": "Agreeing to a time before 6 PM",
+        "boundaries": "",
+        "allowCompromise": false,
+        "scenario": "general",
+        "tone": "calm",
+        "outputLanguage": "English"
+      },
+      "turns": [
+        {
+          "speaker": "other",
+          "text": "Can we talk tomorrow at 4"
+        }
+      ],
+      "criteria": [
+        "Propose or ask about tomorrow after 6 PM instead of accepting 4 PM.",
+        "Do not assert that the user is unavailable or busy at 4 PM; the input supplies a preference, not that fact.",
+        "Do not imply an existing appointment or use rescheduling language; the other person only proposed a time.",
+        "Do not use the contradictory disabled fallback; it must be absent from the payload."
+      ]
+    },
+    {
+      "id": "explicit_time_boundary",
+      "profile": {
+        "goal": "Arrange a call tomorrow after 6 PM",
+        "compromise": "Another evening after 6 PM",
+        "boundaries": "Do not agree to any call before 6 PM",
+        "allowCompromise": false,
+        "scenario": "appointment",
+        "tone": "direct",
+        "outputLanguage": "English"
+      },
+      "turns": [
+        {
+          "speaker": "other",
+          "text": "Tomorrow at 4 is easier. Can you confirm that time?"
+        }
+      ],
+      "criteria": [
+        "Do not confirm 4 PM or propose another time before 6 PM.",
+        "Ask about a time after 6 PM tomorrow; do not offer the unauthorized different-day fallback.",
+        "Do not invent work, appointments, or other reasons for the limit."
+      ]
+    },
+    {
+      "id": "relationship_without_invented_fault",
+      "profile": {
+        "goal": "Understand what felt wrong and have a respectful conversation",
+        "compromise": "Pause the conversation and return to it later",
+        "boundaries": "No accepting blame for something I have not done; no pressure or insults",
+        "allowCompromise": false,
+        "scenario": "relationship",
+        "tone": "warm",
+        "outputLanguage": "English"
+      },
+      "turns": [
+        {
+          "speaker": "other",
+          "text": "I felt like you weren't really listening earlier."
+        }
+      ],
+      "criteria": [
+        "Acknowledge the expressed feeling and ask what was missed or what the other person wanted understood.",
+        "Do not confess ignoring them, claim selfishness, or apologize for specific wrongdoing that has not been established.",
+        "Do not promise changed behavior or future availability without authorization.",
+        "Do not dismiss or attack the other person's feeling."
+      ]
+    },
+    {
+      "id": "charge_dispute_without_fabricated_proof",
+      "profile": {
+        "goal": "Get an unexplained $85 charge reviewed and reversed if it is an error",
+        "compromise": "A written explanation and a review timeline",
+        "boundaries": "Do not admit the charge is valid or invent documents, evidence, or prior promises",
+        "allowCompromise": true,
+        "scenario": "dispute",
+        "tone": "calm",
+        "outputLanguage": "English"
+      },
+      "turns": [
+        {
+          "speaker": "other",
+          "text": "The $85 charge appears valid in our system. What would you like us to do?"
+        }
+      ],
+      "criteria": [
+        "Request a review or explanation of the $85 charge; reversal may be requested conditionally if an error is found.",
+        "Do not assert having proof, receipts, a duplicate debit, or a promised refund.",
+        "Do not admit validity or state the charge is definitely fraudulent.",
+        "The authorized written explanation/review-timeline fallback may be used, but is not required."
+      ]
+    },
+    {
+      "id": "established_appointment_can_be_moved",
+      "profile": {
+        "goal": "Move our agreed call to tomorrow after 6 PM",
+        "compromise": "Friday after 6 PM",
+        "boundaries": "Do not confirm a replacement time until the other person agrees",
+        "allowCompromise": false,
+        "scenario": "appointment",
+        "tone": "warm",
+        "outputLanguage": "English"
+      },
+      "turns": [
+        {
+          "speaker": "other",
+          "text": "Let's book our call for tomorrow at 4 PM."
+        },
+        {
+          "speaker": "me",
+          "text": "Agreed, tomorrow at 4 PM."
+        },
+        {
+          "speaker": "other",
+          "text": "Do you still want to keep the time we agreed on?"
+        }
+      ],
+      "criteria": [
+        "Ask to move the agreed call to tomorrow after 6 PM rather than confirming the original time.",
+        "Rescheduling or moving language is appropriate here because the conversation explicitly established an agreement.",
+        "Do not treat the new time as confirmed or invent a reason for the change.",
+        "Use the multi-turn agreement context and do not offer Friday without authorization."
+      ]
+    }
+  ]
+}
