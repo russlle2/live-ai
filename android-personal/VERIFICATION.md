@@ -67,9 +67,9 @@ The recording was reviewed visually across **17 sampled frames**, and its audio 
 
 The scheduling result retains the requested after-6-PM time, but introduces “reschedule” without a confirmed existing appointment and does not directly acknowledge the proposed 4-PM time. Combined with the misplaced boundary text, the evidence supports improving field guidance and conversational prompting as well as inference speed.
 
-| Work in progress | Status |
+| 0.1.2 update | Status |
 |---|---|
-| UI/runtime changes | Working source is **0.1.2**, **unreleased**; not yet verified as an installed update. Experimental prompt changes were rejected; the existing coaching prompt is retained. |
+| UI/runtime changes | **0.1.2 is installed and verified**, as recorded below. Experimental prompt changes were rejected; the existing coaching prompt is retained. |
 | 0.1.2 core regressions | **12 passed**. |
 | 0.1.2 browser regression groups | **9 passed**, using the simulated native bridge; these remain source-level checks. |
 | Private optimized-engine build | **Pass** — clean pinned source, separate build directory, CPU feature flags and successful inference verified. |
@@ -123,7 +123,13 @@ The preparation result is a status for completed setup, not proof that Android w
 | Core tests | **13 passed**, including unchanged coaching messages and no session mutation from preparation. |
 | Browser regressions | **14 groups passed**, including preparation isolation, preserved Prepared status across ordinary turns, cancellation/timeout, late-event rejection, and real-request priority. Native bridge is simulated. |
 | Phone inference | **Pass for preparation/cache operation**, timings above. Does not establish general response quality. |
-| APK build/signature/assets | **Pending**: the final source archive transfer and a subsequent REPL connectivity probe stopped responding, although device inventory still reports Online. Neither request returned a successful completion. No 0.1.3 phone build was started, and no 0.1.3 APK is claimed as delivered. Resume after the phone connection responds; verify any partially completed transfer before building. |
+| Source transfer | **Pass** after reconnecting: decoded archive SHA-256 checked before extraction; all **22 source files** matched the tested source at `0d681c2`. The earlier failed transfer had not created an archive on the phone. |
+| APK build/signature | **Pass**: Android resource compilation, Java compilation, D8, and build exited 0. APK Signature Scheme v3 verified, one signer; certificate SHA-256 remains `14f17525e11f7b2905bf3bfd26d29501de49ca122c252feb624b2144c1c7580b`, matching the installed app. |
+| APK identity | Package `com.christopherlake.liverhetoric`, version **0.1.3**, code **4**, **78,944 bytes**, SHA-256 `fb31531ba83498202dca3f16536a9324099c10a27995cd55b006aa32a6a1793d`. |
+| Bundled assets | **Pass**: all **7 bundled asset files** match their verified source hashes. Core SHA-256 `667e1c6bd8a917d20e95c2c75db5c523eccf68fc4ae3e64025e91c78e7480b35`; UI script SHA-256 `248967c50bf5e28c6185cd89a199fad6506bd5bdb01289796d6ed1650caa8d4f`. |
+| Delivery | Copied to phone Downloads as **Live-Rhetoric-0.1.3.apk**, also **Live-Rhetoric-personal.apk**. |
+| Native bridge packaging | **Pass**: the built DEX contains the new preparation bridge method and capability flag. This is a packaging check, not an executed Android UI test. |
+| Local engine | Found stopped after reconnection; the managed guide was restarted successfully and `/health` returned **ok**. |
 | Installation and native preparation retest | Pending user installer action and device retest. |
 
 ## Remaining readiness gates
