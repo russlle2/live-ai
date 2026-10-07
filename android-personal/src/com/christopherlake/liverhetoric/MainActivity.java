@@ -173,7 +173,7 @@ public class MainActivity extends Activity {
 
     private void emitReady() {
         JSONObject object = event("ready");
-        put(object, "version", "0.1.1");
+        put(object, "version", "0.1.2");
         emit(object);
     }
 
@@ -203,7 +203,7 @@ public class MainActivity extends Activity {
             JSONObject object = new JSONObject();
             put(object, "speechAvailable", speechAvailable());
             put(object, "sdk", Build.VERSION.SDK_INT);
-            put(object, "version", "0.1.1");
+            put(object, "version", "0.1.2");
             put(object, "captionExperimental", true);
             put(object, "captionServiceEnabled", CaptionAccessibilityService.isConnected());
             return object.toString();

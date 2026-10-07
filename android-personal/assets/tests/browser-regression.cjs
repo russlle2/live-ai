@@ -38,6 +38,23 @@ const {chromium}=require('playwright');
     assert.equal(await page.locator('#connectionText').textContent(),'Local guide connected');
     console.log('PASS startup: no health request before native readiness; first ready event connects.');
 
+    assert.deepEqual(await page.locator('.direction-fields textarea').evaluateAll(fields=>fields.map(field=>field.id)),['goal','boundaries','compromise']);
+    assert.match(await page.locator('label[for=boundaries]').textContent(),/What must not happen\?/);
+    assert.equal(await page.locator('#compromise').isDisabled(),true);
+    assert.match(await page.locator('#compromiseStatus').textContent(),/Not used/);
+    await page.locator('#goal').fill('Arrange a call tomorrow after 6 PM.');
+    await page.locator('#boundaries').fill('Do not agree to a time before 6 PM.');
+    await page.locator('#allowCompromise').check();
+    await page.locator('#compromise').fill('Another evening this week.');
+    await page.locator('#allowCompromise').uncheck();
+    assert.equal(await page.locator('#compromise').isDisabled(),true);
+    assert.equal(await page.locator('#compromise').inputValue(),'Another evening this week.');
+    assert.equal(await page.locator('#boundaries').inputValue(),'Do not agree to a time before 6 PM.');
+    await page.locator('#allowCompromise').check();
+    assert.equal(await page.locator('#compromise').inputValue(),'Another evening this week.');
+    await page.locator('#allowCompromise').uncheck();
+    console.log('PASS direction fields: goal then hard limits, optional fallback disabled until enabled; toggling preserves entered text and never moves it into hard limits.');
+
     await page.locator('[data-speaker=other]').click();await page.locator('#micButton').click();
     await page.evaluate(()=>NativeEvent({type:'speech',phase:'final',text:'Could we schedule an appointment?'}));
     assert.equal(await page.evaluate(()=>calls.filter(c=>c[0]==='generate').length),1);
@@ -76,7 +93,8 @@ const {chromium}=require('playwright');
     console.log('PASS model failures: persistent error feedback, incomplete-output rejection, visible timeout.');
 
     await page.locator('#coachButton').click();request=await page.evaluate(()=>calls.filter(c=>c[0]==='generate').at(-1)[1]);
-    await page.evaluate(id=>NativeEvent({type:'generation',requestId:id,phase:'done',text:'Would tomorrow morning work for you?'}),request.requestId);
+    await page.evaluate(id=>NativeEvent({type:'generation',requestId:id,phase:'done',text:'Would tomorrow evening work for you?',elapsedMs:14200}),request.requestId);
+    assert.equal(await page.locator('#resultStatus').textContent(),'Generation: 14.2 sec');
     await page.evaluate(()=>NativeEvent({type:'caption',text:'x'.repeat(6001),status:'captured'}));
     assert.equal(await page.locator('#utterance').inputValue(),'x'.repeat(6001));
     assert.match(await page.locator('#toast').textContent(),/exceeds 6,000/);

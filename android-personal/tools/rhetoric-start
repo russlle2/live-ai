@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -70,6 +71,24 @@ def stop(state):
     (STATE / "server.json").unlink(missing_ok=True)
 
 
+def runtime():
+    environment = os.environ.copy()
+    executable = "llama-server"
+    if BACKEND == "cpu" and config.get("cpu_binary"):
+        executable = str(Path(config["cpu_binary"]).expanduser().resolve())
+        if not Path(executable).is_file() or not os.access(executable, os.X_OK):
+            raise SystemExit("Configured CPU engine is missing or not executable. Remove cpu_binary to use Termux's engine.")
+    elif BACKEND == "cpu" and not shutil.which(executable):
+        raise SystemExit("Termux's llama-server is missing. Install llama-cpp or select a tested cpu_binary; the running engine was left alone.")
+    if BACKEND == "vulkan":
+        executable = str(Path(config.get("vulkan_binary", str(Path.home() / "llama-server-vulkan"))).expanduser())
+        library_dir = Path(config.get("vulkan_libraries", str(Path.home() / "llama-vulkan-libs"))).expanduser()
+        if not Path(executable).is_file() or not (library_dir / "libggml-vulkan.so").is_file():
+            raise SystemExit("Configured Vulkan runtime is missing. Set backend to cpu or provide the matching binary and libraries.")
+        environment["LD_LIBRARY_PATH"] = str(library_dir) + ":" + environment.get("LD_LIBRARY_PATH", "")
+    return executable, environment
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "fast"
     STATE.mkdir(parents=True, exist_ok=True)
@@ -84,7 +103,8 @@ def main():
         return
     if mode not in MODELS:
         raise SystemExit("Use: rhetoric-start [fast|custom|status|stop]")
-    if state and state["mode"] == mode and state["model"] == str(MODELS[mode][0]) and state.get("backend", "cpu") == BACKEND:
+    executable, environment = runtime()
+    if state and state["mode"] == mode and state["model"] == str(MODELS[mode][0]) and state.get("backend", "cpu") == BACKEND and state.get("executable") == executable:
         print("Engine is ready. Open Live Rhetoric." if ready(state) else "Engine is still loading. Check rhetoric-start status.")
         return
     path, port, alias = MODELS[mode]
@@ -102,14 +122,6 @@ def main():
         probe.settimeout(1)
         if probe.connect_ex(("127.0.0.1", port)) == 0:
             raise SystemExit("Port is already in use; leaving that service alone: " + str(port))
-    environment = os.environ.copy()
-    executable = "llama-server"
-    if BACKEND == "vulkan":
-        executable = str(Path(config.get("vulkan_binary", str(Path.home() / "llama-server-vulkan"))).expanduser())
-        library_dir = Path(config.get("vulkan_libraries", str(Path.home() / "llama-vulkan-libs"))).expanduser()
-        if not Path(executable).is_file() or not (library_dir / "libggml-vulkan.so").is_file():
-            raise SystemExit("Configured Vulkan runtime is missing. Set backend to cpu or provide the matching binary and libraries.")
-        environment["LD_LIBRARY_PATH"] = str(library_dir) + ":" + environment.get("LD_LIBRARY_PATH", "")
     args = [executable, "-m", str(path), "--alias", alias, "--host", "127.0.0.1", "--port", str(port),
             "-c", "2048", "-t", "4", "-tb", "4", "-b", "128", "-ub", "128", "--device", "Vulkan0" if BACKEND == "vulkan" else "none",
             "-ngl", "99" if BACKEND == "vulkan" else "0", "--parallel", "1", "--cache-ram", "0", "--jinja", "--no-webui", "-n", "128"]
