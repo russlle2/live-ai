@@ -107,11 +107,26 @@ After the launcher reports Ready, open Live Rhetoric, choose the corresponding e
 
 ## Verification
 
+See [VERIFICATION.md](VERIFICATION.md) for the **2026-10-07 UTC** results, artifact status, measured latency, and outstanding device checks. The current source is version 0.1.1: it adds native startup readiness, refreshes microphone availability, fixes failed-start/stop state, rejects oversized captions without retaining current-looking old advice, and closes a foreground-generation race.
+
 ```sh
 node --test assets/tests/core.test.cjs
+```
+
+The browser regression requires the **Playwright Node package** and compatible Chromium. It uses a simulated native bridge; it does not test an installed APK. Run with Playwright's installed Chromium, or provide an existing executable:
+
+```sh
+node assets/tests/browser-regression.cjs
+# Optional executable override:
+RHETORIC_CHROMIUM=/absolute/path/to/chromium node assets/tests/browser-regression.cjs
+```
+
+Build and verify the APK in the prepared Termux environment:
+
+```sh
 python tools/build.py
 ```
 
-A Spanish translation smoke test preserved “cannot before 10 AM” and “this week.” Repeating the identical cached request streamed its first token in 0.18 seconds and finished in 4.13 seconds; this is a cache-hit result, not representative new-conversation latency.
+The latest verification passed **11 core tests and 8 browser regression groups**. Three direct local API requests completed in **14–21 seconds**; translation preserved the tested constraints but used an unsuitable noun for a financial charge. These results support further device testing, not a claim of smooth live-call readiness.
 
 The JavaScript suite checks conversation/request behavior. The build compiles Java/resources, creates DEX, signs the APK, and verifies its signature. These checks do not certify Samsung caption compatibility, microphone behavior during a call, translation accuracy, or model judgment. Verify the installed app on the target phone with a short ordinary utterance, cancelled generation, an imported text sample, and foreground/background transitions before relying on it in a conversation.

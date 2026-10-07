@@ -107,7 +107,10 @@ public class MainActivity extends Activity {
             @Override public void onPageFinished(WebView view, String url) {
                 if (!ENTRY.equals(url)) return;
                 pageReady = true;
-                if (pendingImport != null) { emit(pendingImport); pendingImport = null; }
+                emitReady();
+                JSONObject importToDeliver = pendingImport;
+                pendingImport = null;
+                if (importToDeliver != null) emit(importToDeliver);
             }
         });
         web.loadUrl(ENTRY);
@@ -123,6 +126,7 @@ public class MainActivity extends Activity {
     @Override protected void onStart() {
         super.onStart();
         foreground = true;
+        if (pageReady) emitReady();
     }
 
     @Override protected void onStop() {
@@ -167,12 +171,24 @@ public class MainActivity extends Activity {
         }});
     }
 
+    private void emitReady() {
+        JSONObject object = event("ready");
+        put(object, "version", "0.1.1");
+        emit(object);
+    }
+
     static void receiveCaption(String text, String status) {
+        receiveCaption(text, status, false);
+    }
+
+    static void receiveCaption(String text, String status, boolean overflow) {
         MainActivity activity = currentActivity.get();
         if (activity == null || activity.destroyed) return;
         JSONObject object = event("caption");
         put(object, "text", text == null ? "" : text);
         put(object, "status", status);
+        put(object, "overflow", overflow);
+        put(object, "limit", 6000);
         activity.emit(object);
     }
 
@@ -187,7 +203,7 @@ public class MainActivity extends Activity {
             JSONObject object = new JSONObject();
             put(object, "speechAvailable", speechAvailable());
             put(object, "sdk", Build.VERSION.SDK_INT);
-            put(object, "version", "0.1.0");
+            put(object, "version", "0.1.1");
             put(object, "captionExperimental", true);
             put(object, "captionServiceEnabled", CaptionAccessibilityService.isConnected());
             return object.toString();
@@ -337,8 +353,10 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(requestCode, permissions, results);
         if (requestCode != MIC_PERMISSION) return;
         String language = pendingLanguage; pendingLanguage = null;
-        if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED && language != null) beginSpeech(language);
-        else speechEvent("error", "", "Microphone permission was not granted. You can still type, paste, or import text.");
+        if (results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED) {
+            if (language != null) beginSpeech(language);
+            else speechEvent("stopped", "", "Microphone permission is granted. Tap Speak when you are ready to listen.");
+        } else speechEvent("error", "", "Microphone permission was not granted. You can still type, paste, or import text.");
     }
 
     private static boolean allowedPort(int port) { return port == 8080 || port == 8081; }
@@ -423,7 +441,10 @@ public class MainActivity extends Activity {
             body.put("chat_template_kwargs", new JSONObject().put("enable_thinking", false));
             final Generation generation = new Generation(requestId);
             cancelCurrent();
-            synchronized (generationLock) { activeGeneration = generation; }
+            synchronized (generationLock) {
+                if (destroyed || !foreground) throw new Exception("Open Live Rhetoric to generate a suggestion.");
+                activeGeneration = generation;
+            }
             inferenceWorker.execute(new Runnable() { @Override public void run() { runGeneration(generation, port, body); }});
         } catch (Exception e) {
             generationEvent(new Generation(requestId), "error", null, e.getMessage() == null ? "Invalid generation request." : e.getMessage());
